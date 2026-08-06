@@ -71,7 +71,25 @@ colours as a hint.
 is `60 / 110 * 2` seconds and every character is phase-locked to the audio start via a
 negative `animation-delay`, so characters that start singing later stay in step.
 
-## Not persisted
+## Learning game (Sound Island v1)
 
-There is no `localStorage` / `sessionStorage`. The mix, the roster and discovered
-combos live in React state and are lost on refresh. That is intentional for v1.
+On top of the mixer sits a phonics game for kids (3–7):
+
+- **Profiles** — each kid gets their own save (coins, monsters, creations),
+  stored in `localStorage` on the device. The last active player auto-resumes.
+- **Play** — spoken questions via the browser's speech synthesis. Two tiers:
+  *Little* (3–5): hear a pure sound, tap the monster that says it.
+  *Big* (5–7): hear a word, tap the sound it starts with.
+- **Coins** — +2 per correct answer, streak bonuses every 5.
+- **Monsters** — the s-a-t-p-i-n crew. Each correct answer gives that monster
+  XP; feeding (5 coins) gives more. XP climbs NumBots-style metal tiers:
+  Bronze → Silver → Gold → Diamond → Rainbow.
+- **Shop** — the crew starts with s and a; t, p, i, n are bought with coins.
+- Owned monsters join the roster and can perform on the mixer Stage.
+
+Note on phoneme audio: browser TTS cannot produce a perfectly clean /t/ or
+/p/, so those prompts use close approximations ("tuh", "puh"). For proper
+phonics precision, swap in recorded voice clips later.
+
+The stage arrangement itself (which sound is on which slot) is still
+session-only by design.

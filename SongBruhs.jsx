@@ -3,6 +3,7 @@ import * as Tone from 'tone';
 import {
   Play, Volume2, VolumeX, Shuffle, Trash2, X, Check, Sparkles,
   Music, Wand2, Headphones, Users, Ban,
+  Coins, Cookie, Medal, Lock, RotateCcw, Star, Ear, Heart, ShoppingBag,
 } from 'lucide-react';
 
 /* ==========================================================================
@@ -1024,6 +1025,496 @@ const DEFAULT_CHARS = [
 ];
 
 /* ==========================================================================
+   LEARNING GAME — phonics monsters, coins, metal tiers, on-device save
+   ========================================================================== */
+const SAVE_KEY = 'songbruhs_save_v1';
+const uid = (p) => `${p}_${Math.random().toString(36).slice(2, 9)}`;
+const shuffleArr = (a) => {
+  const out = a.slice();
+  for (let i = out.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [out[i], out[j]] = [out[j], out[i]];
+  }
+  return out;
+};
+
+/* NumBots-style tiers. xp comes from correct answers (+1) and feeding (+2). */
+const METALS = [
+  { key: 'bronze', label: 'Bronze', need: 0, text: 'text-orange-400', border: 'border-orange-400' },
+  { key: 'silver', label: 'Silver', need: 4, text: 'text-neutral-300', border: 'border-neutral-300' },
+  { key: 'gold', label: 'Gold', need: 10, text: 'text-amber-300', border: 'border-amber-300' },
+  { key: 'diamond', label: 'Diamond', need: 18, text: 'text-cyan-300', border: 'border-cyan-300' },
+  { key: 'rainbow', label: 'Rainbow', need: 30, text: 'text-fuchsia-300', border: 'border-fuchsia-300' },
+];
+const metalOf = (xp) => { let m = METALS[0]; METALS.forEach((x) => { if (xp >= x.need) m = x; }); return m; };
+const nextMetal = (xp) => METALS.find((m) => m.need > xp) || null;
+
+const COIN_CORRECT = 2;
+const STREAK_EVERY = 5;
+const STREAK_BONUS = 3;
+const FEED_COST = 5;
+const FEED_XP = 2;
+
+/* The s-a-t-p-i-n crew. `say` is what the browser voice utters for the pure
+   sound — TTS can't make a truly clean /t/ or /p/, so these are the closest
+   teachable approximations; swap for recorded clips later. */
+const PHONEMES = [
+  { id: 'ph_s', letter: 's', say: 'ssss', name: 'Sizzo', price: 0,
+    words: ['sun', 'sock', 'sand', 'soup'],
+    char: { id: 'ph_s', name: 'Sizzo', body: 'tall', eyes: 'sleepy', mouth: 'smile', head: 'antenna', acc: 'tail', primary: '#3ec9a7', accent: '#7ae582', detail: '#2b2b33' } },
+  { id: 'ph_a', letter: 'a', say: 'a', name: 'Azza', price: 0,
+    words: ['ant', 'apple', 'astronaut', 'ambulance'],
+    char: { id: 'ph_a', name: 'Azza', body: 'round', eyes: 'two', mouth: 'grin', head: 'mohawk', acc: 'scarf', primary: '#ef6461', accent: '#ffd166', detail: '#2b2b33' } },
+  { id: 'ph_t', letter: 't', say: 'tuh', name: 'Tikko', price: 25,
+    words: ['tap', 'ten', 'tiger', 'towel'],
+    char: { id: 'ph_t', name: 'Tikko', body: 'hex', eyes: 'square', mouth: 'zig', head: 'cap', acc: 'badge', primary: '#4ea8de', accent: '#5fd0e8', detail: '#ffd166' } },
+  { id: 'ph_p', letter: 'p', say: 'puh', name: 'Popsy', price: 25,
+    words: ['pig', 'pan', 'panda', 'puddle'],
+    char: { id: 'ph_p', name: 'Popsy', body: 'bell', eyes: 'three', mouth: 'tongue', head: 'antenna', acc: 'phones', primary: '#ef7fae', accent: '#ff8fab', detail: '#ffe9c9' } },
+  { id: 'ph_i', letter: 'i', say: 'ih', name: 'Inko', price: 40,
+    words: ['ink', 'insect', 'igloo', 'itchy'],
+    char: { id: 'ph_i', name: 'Inko', body: 'spike', eyes: 'cyclops', mouth: 'smile', head: 'halo', acc: 'none', primary: '#f6d365', accent: '#fdfdfb', detail: '#2b2b33' } },
+  { id: 'ph_n', letter: 'n', say: 'nnnn', name: 'Nono', price: 40,
+    words: ['net', 'nose', 'nut', 'ninja'],
+    char: { id: 'ph_n', name: 'Nono', body: 'blob', eyes: 'star', mouth: 'fangs', head: 'horns', acc: 'wings', primary: '#9d7bea', accent: '#c58cf5', detail: '#ffd166' } },
+];
+const PHONEME_BY_ID = {};
+PHONEMES.forEach((p) => { PHONEME_BY_ID[p.id] = p; });
+
+const PRAISE = ['Brilliant!', 'Well done!', 'Amazing!', 'You got it!', 'Super!'];
+
+/* --- speech ---------------------------------------------------------------
+   Browser TTS for prompts; no-ops cleanly where speechSynthesis is missing. */
+let cachedVoice;
+function speak(text, opts) {
+  try {
+    const synth = window.speechSynthesis;
+    if (!synth || typeof SpeechSynthesisUtterance === 'undefined') return;
+    synth.cancel();
+    const u = new SpeechSynthesisUtterance(text);
+    if (cachedVoice === undefined) {
+      const vs = synth.getVoices();
+      cachedVoice = vs.find((v) => /en[-_]GB/i.test(v.lang)) || vs.find((v) => /^en/i.test(v.lang)) || null;
+    }
+    if (cachedVoice) u.voice = cachedVoice;
+    u.rate = (opts && opts.rate) || 0.85;
+    u.pitch = (opts && opts.pitch) || 1.05;
+    synth.speak(u);
+  } catch (e) { /* speech unsupported */ }
+}
+
+/* --- on-device save ------------------------------------------------------- */
+function loadSave() {
+  try {
+    const raw = window.localStorage.getItem(SAVE_KEY);
+    const s = raw ? JSON.parse(raw) : null;
+    if (s && Array.isArray(s.profiles)) return s;
+  } catch (e) { /* fresh start */ }
+  return { profiles: [], active: null };
+}
+function persistSave(data) {
+  try { window.localStorage.setItem(SAVE_KEY, JSON.stringify(data)); } catch (e) { /* full/blocked */ }
+}
+function newProfile(name, tier, colour) {
+  return {
+    id: uid('kid'),
+    name,
+    tier, // 'A' = 3-5 hear-a-sound, 'B' = 5-7 first-sound-of-word
+    colour,
+    coins: 10,
+    mons: { ph_s: { xp: 0 }, ph_a: { xp: 0 } },
+    createdChars: [],
+    discovered: [],
+    correct: 0,
+  };
+}
+
+/* ==========================================================================
+   GAME UI PIECES
+   ========================================================================== */
+function CoinPill({ coins }) {
+  return (
+    <span aria-label={`${coins} coins`} data-coins={coins} className="flex h-12 items-center gap-1 rounded-full border-2 border-amber-300 bg-neutral-900 px-3 text-base font-black text-amber-300">
+      <Coins className="h-5 w-5" /> {coins}
+    </span>
+  );
+}
+
+function MetalBadge({ xp }) {
+  const m = metalOf(xp);
+  return (
+    <span className={`flex items-center gap-1 rounded-full border-2 ${m.border} bg-neutral-950 px-2 py-0.5 text-xs font-black ${m.text}`}>
+      <Medal className="h-3 w-3" /> {m.label}
+    </span>
+  );
+}
+
+function ProfileGate({ save, setSave }) {
+  const [creating, setCreating] = useState(save.profiles.length === 0);
+  const [name, setName] = useState(save.profiles.length === 0 ? 'Player 1' : '');
+  const [tier, setTier] = useState('A');
+  const [colour, setColour] = useState(PAL_PRIMARY[4]);
+
+  const create = () => {
+    const p = newProfile(name.trim() || `Player ${save.profiles.length + 1}`, tier, colour);
+    setSave((s) => ({ profiles: s.profiles.concat(p), active: p.id }));
+    speak(`Hello ${p.name}! Let's play!`);
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-neutral-950 px-4">
+      <div className="w-full max-w-md rounded-3xl border-2 border-neutral-800 bg-neutral-900 p-5">
+        <h2 className="flex items-center gap-2 text-xl font-black text-neutral-50">
+          <Users className="h-5 w-5 text-amber-300" /> Who's playing?
+        </h2>
+
+        {!creating && (
+          <>
+            <div className="mt-4 flex flex-col gap-2">
+              {save.profiles.map((p) => (
+                <button
+                  key={p.id}
+                  type="button"
+                  onClick={() => { setSave((s) => ({ ...s, active: p.id })); speak(`Hello ${p.name}!`); }}
+                  className="flex min-h-14 items-center gap-3 rounded-2xl border-2 border-neutral-700 bg-neutral-950 px-3 text-left hover:border-amber-300"
+                >
+                  <Character char={{ ...DEFAULT_CHARS[0], primary: p.colour }} size={34} />
+                  <span className="flex-1 text-base font-black text-neutral-100">{p.name}</span>
+                  <span className="flex items-center gap-1 text-sm font-bold text-amber-300"><Coins className="h-4 w-4" />{p.coins}</span>
+                </button>
+              ))}
+            </div>
+            <button
+              type="button"
+              onClick={() => setCreating(true)}
+              className="mt-3 flex min-h-12 w-full items-center justify-center gap-2 rounded-2xl border-2 border-neutral-800 text-sm font-bold text-neutral-300 hover:border-neutral-600"
+            >
+              + New player
+            </button>
+          </>
+        )}
+
+        {creating && (
+          <div className="mt-4 flex flex-col gap-4">
+            <input
+              value={name}
+              maxLength={16}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="Name"
+              className="w-full rounded-2xl border-2 border-neutral-700 bg-neutral-950 px-4 py-3 text-center text-lg font-black text-neutral-100"
+              aria-label="Player name"
+            />
+            <div className="grid grid-cols-2 gap-2">
+              {[['A', 'Little (3–5)', 'Hear a sound, find the monster'], ['B', 'Big (5–7)', 'Hear a word, find its first sound']].map(([k, label, desc]) => (
+                <button
+                  key={k}
+                  type="button"
+                  onClick={() => setTier(k)}
+                  className={[
+                    'flex min-h-16 flex-col items-center justify-center rounded-2xl border-2 px-2 text-center',
+                    tier === k ? 'border-amber-300 bg-neutral-800' : 'border-neutral-700 bg-neutral-950',
+                  ].join(' ')}
+                >
+                  <span className="text-sm font-black text-neutral-100">{label}</span>
+                  <span className="text-xs text-neutral-500">{desc}</span>
+                </button>
+              ))}
+            </div>
+            <div className="grid grid-cols-8 gap-2">
+              {PAL_PRIMARY.map((c) => (
+                <button
+                  key={c}
+                  type="button"
+                  aria-label={`Colour ${c}`}
+                  onClick={() => setColour(c)}
+                  className={`h-10 rounded-xl border-2 ${colour === c ? 'border-amber-300' : 'border-neutral-800'}`}
+                  style={{ backgroundColor: c }}
+                />
+              ))}
+            </div>
+            <button
+              type="button"
+              onClick={create}
+              className="flex min-h-14 w-full items-center justify-center gap-2 rounded-2xl bg-amber-400 text-lg font-black text-neutral-950 hover:bg-amber-300"
+            >
+              <Play className="h-5 w-5" fill="currentColor" /> Let's play!
+            </button>
+            {save.profiles.length > 0 && (
+              <button type="button" onClick={() => setCreating(false)} className="text-sm font-bold text-neutral-500">
+                Back
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* --- Play tab: the phonics round ------------------------------------------ */
+function makeQuestion(profile, lastTargetId) {
+  const owned = PHONEMES.filter((p) => profile.mons[p.id]);
+  const pool = owned.filter((p) => p.id !== lastTargetId);
+  const target = (pool.length ? pool : owned)[Math.floor(Math.random() * (pool.length ? pool.length : owned.length))];
+  const others = shuffleArr(PHONEMES.filter((p) => p.id !== target.id)).slice(0, 2);
+  return {
+    target,
+    word: profile.tier === 'B' ? target.words[Math.floor(Math.random() * target.words.length)] : null,
+    choices: shuffleArr([target, ...others]),
+  };
+}
+function promptFor(q, tier) {
+  return tier === 'B'
+    ? `Which sound does ${q.word} start with? ... ${q.word}`
+    : `Find the monster that says ... ${q.target.say}`;
+}
+
+function LearnTab({ profile, updateProfile, setToast }) {
+  const [q, setQ] = useState(() => makeQuestion(profile, null));
+  const [phase, setPhase] = useState('ask'); // ask | correct
+  const [wrongId, setWrongId] = useState(null);
+  const [streak, setStreak] = useState(0);
+  const timer = useRef(null);
+
+  useEffect(() => () => clearTimeout(timer.current), []);
+  useEffect(() => { speak(promptFor(q, profile.tier)); }, [q]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const next = useCallback(() => {
+    setQ((old) => makeQuestion(profile, old.target.id));
+    setPhase('ask');
+    setWrongId(null);
+  }, [profile]);
+
+  const answer = (p) => {
+    if (phase !== 'ask') return;
+    if (p.id === q.target.id) {
+      setPhase('correct');
+      const newStreak = streak + 1;
+      setStreak(newStreak);
+      const bonus = newStreak % STREAK_EVERY === 0 ? STREAK_BONUS : 0;
+      const prevXp = profile.mons[p.id].xp;
+      const grew = metalOf(prevXp + 1).key !== metalOf(prevXp).key;
+      updateProfile((pr) => ({
+        ...pr,
+        coins: pr.coins + COIN_CORRECT + bonus,
+        correct: pr.correct + 1,
+        mons: { ...pr.mons, [p.id]: { xp: pr.mons[p.id].xp + 1 } },
+      }));
+      const praise = PRAISE[Math.floor(Math.random() * PRAISE.length)];
+      speak(grew
+        ? `${praise} ${p.name} is now ${metalOf(prevXp + 1).label}!`
+        : bonus ? `${praise} ${newStreak} in a row!` : `${praise} ${p.say}!`);
+      if (grew) setToast(`${p.name} reached ${metalOf(prevXp + 1).label}!`);
+      else if (bonus) setToast(`Streak! +${STREAK_BONUS} bonus coins`);
+      timer.current = setTimeout(next, 1500);
+    } else {
+      setWrongId(p.id);
+      setStreak(0);
+      speak(`That one says ${p.say}. Try again!`);
+      timer.current = setTimeout(() => setWrongId(null), 400);
+    }
+  };
+
+  return (
+    <div className="mx-auto max-w-lg">
+      <div className="flex items-center justify-between">
+        <button
+          type="button"
+          onClick={() => speak(promptFor(q, profile.tier))}
+          className="flex min-h-12 items-center gap-2 rounded-2xl border-2 border-neutral-700 bg-neutral-900 px-4 text-sm font-black text-neutral-100 hover:border-amber-300"
+        >
+          <RotateCcw className="h-4 w-4 text-amber-300" /> Hear it again
+        </button>
+        <span className="flex items-center gap-1 text-sm font-black text-amber-300">
+          <Star className="h-4 w-4" fill="currentColor" /> {streak}
+        </span>
+      </div>
+
+      <div className="mt-3 rounded-3xl border-2 border-neutral-800 bg-neutral-900 p-4 text-center">
+        {profile.tier === 'B' ? (
+          <p className="text-lg font-black text-neutral-100">
+            Which sound does <span className="text-amber-300">{q.word}</span> start with?
+          </p>
+        ) : (
+          <p className="text-lg font-black text-neutral-100">Find the monster that says the sound!</p>
+        )}
+        <p className="mt-1 text-xs text-neutral-500">Tap the speaker to hear it as many times as you like</p>
+      </div>
+
+      <div className="mt-3 grid grid-cols-3 gap-2">
+        {q.choices.map((p) => {
+          const correct = phase === 'correct' && p.id === q.target.id;
+          return (
+            <button
+              key={p.id}
+              type="button"
+              onClick={() => answer(p)}
+              className={[
+                'flex min-h-14 flex-col items-center rounded-3xl border-2 bg-neutral-900 p-2 pt-3',
+                correct ? 'border-amber-300 bg-neutral-800' : 'border-neutral-800 hover:border-neutral-600',
+                wrongId === p.id ? 'sb-shake border-red-500' : '',
+              ].join(' ')}
+            >
+              <div className={correct ? 'sb-anim' : ''} style={correct ? { animation: `sb-bob ${BOB_SEC}s ease-in-out infinite` } : undefined}>
+                <Character char={p.char} size={64} singing={correct} />
+              </div>
+              <span className="mt-1 text-4xl font-black text-neutral-100">{p.letter}</span>
+            </button>
+          );
+        })}
+      </div>
+
+      <p className="mt-3 text-center text-xs text-neutral-600">
+        +{COIN_CORRECT} coins for every right answer · streaks of {STREAK_EVERY} earn a bonus
+      </p>
+    </div>
+  );
+}
+
+/* --- Monsters tab: roster, feeding, metals -------------------------------- */
+function MonstersTab({ profile, updateProfile, setToast, onGoShop }) {
+  const feed = (p) => {
+    if (profile.coins < FEED_COST) { speak('You need more coins! Play to earn some.'); return; }
+    const prevXp = profile.mons[p.id].xp;
+    const grew = metalOf(prevXp + FEED_XP).key !== metalOf(prevXp).key;
+    updateProfile((pr) => ({
+      ...pr,
+      coins: pr.coins - FEED_COST,
+      mons: { ...pr.mons, [p.id]: { xp: pr.mons[p.id].xp + FEED_XP } },
+    }));
+    speak(grew ? `Yum! ${p.name} is now ${metalOf(prevXp + FEED_XP).label}!` : `Yum yum! Thank you!`, { pitch: 1.3 });
+    if (grew) setToast(`${p.name} reached ${metalOf(prevXp + FEED_XP).label}!`);
+  };
+
+  return (
+    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+      {PHONEMES.map((p) => {
+        const owned = profile.mons[p.id];
+        if (!owned) {
+          return (
+            <button
+              key={p.id}
+              type="button"
+              onClick={onGoShop}
+              className="flex min-h-24 items-center gap-3 rounded-3xl border-2 border-neutral-800 bg-neutral-950 p-3 opacity-60 hover:opacity-90"
+            >
+              <div className="saturate-0"><Character char={p.char} size={52} /></div>
+              <div className="flex-1 text-left">
+                <p className="text-base font-black text-neutral-500">? ? ?</p>
+                <p className="text-xs text-neutral-600">Waiting in the shop</p>
+              </div>
+              <Lock className="h-5 w-5 shrink-0 text-neutral-600" />
+            </button>
+          );
+        }
+        const m = metalOf(owned.xp);
+        const nm = nextMetal(owned.xp);
+        return (
+          <div key={p.id} className={`rounded-3xl border-2 ${m.border} bg-neutral-900 p-3`}>
+            <div className="flex items-center gap-3">
+              <Character char={p.char} size={56} />
+              <div className="min-w-0 flex-1">
+                <p className="flex items-center gap-2 text-base font-black text-neutral-100">
+                  {p.name} <span className="text-2xl text-amber-300">{p.letter}</span>
+                </p>
+                <MetalBadge xp={owned.xp} />
+              </div>
+            </div>
+            {nm ? (
+              <div className="mt-2">
+                <div className="h-2 w-full overflow-hidden rounded-full bg-neutral-800">
+                  <div className={`h-full rounded-full ${m.key === 'bronze' ? 'bg-orange-400' : m.key === 'silver' ? 'bg-neutral-300' : m.key === 'gold' ? 'bg-amber-300' : 'bg-cyan-300'}`}
+                    style={{ width: `${Math.min(100, Math.round(((owned.xp - m.need) / (nm.need - m.need)) * 100))}%` }} />
+                </div>
+                <p className="mt-1 text-xs text-neutral-500">{nm.need - owned.xp} to {nm.label}</p>
+              </div>
+            ) : (
+              <p className="mt-2 text-xs font-bold text-fuchsia-300">Fully grown — a true Rainbow bruh!</p>
+            )}
+            <div className="mt-2 grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                onClick={() => speak(`${p.name} says ... ${p.say}!`)}
+                className="flex min-h-12 items-center justify-center gap-1 rounded-2xl border-2 border-neutral-700 text-xs font-black text-neutral-200 hover:border-neutral-500"
+              >
+                <Volume2 className="h-4 w-4" /> Hear
+              </button>
+              <button
+                type="button"
+                onClick={() => feed(p)}
+                disabled={!nm}
+                className="flex min-h-12 items-center justify-center gap-1 rounded-2xl bg-amber-400 text-xs font-black text-neutral-950 hover:bg-amber-300 disabled:opacity-40"
+              >
+                <Cookie className="h-4 w-4" /> Feed ({FEED_COST} <Coins className="h-3 w-3" />)
+              </button>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/* --- Shop tab -------------------------------------------------------------- */
+function ShopTab({ profile, updateProfile, setToast }) {
+  const buy = (p) => {
+    if (profile.coins < p.price) { speak('Not enough coins yet! Play to earn more.'); return; }
+    updateProfile((pr) => ({
+      ...pr,
+      coins: pr.coins - p.price,
+      mons: { ...pr.mons, [p.id]: { xp: 0 } },
+    }));
+    speak(`Welcome ${p.name}! ${p.name} says ${p.say}!`, { pitch: 1.2 });
+    setToast(`${p.name} joined your band!`);
+  };
+  const locked = PHONEMES.filter((p) => !profile.mons[p.id]);
+
+  return (
+    <div>
+      {locked.length === 0 ? (
+        <div className="rounded-3xl border-2 border-neutral-800 bg-neutral-900 p-6 text-center">
+          <p className="text-lg font-black text-neutral-100">The whole crew is yours!</p>
+          <p className="mt-1 text-sm text-neutral-500">More sound monsters are on their way…</p>
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+          {locked.map((p) => {
+            const afford = profile.coins >= p.price;
+            return (
+              <div key={p.id} className="flex flex-col items-center rounded-3xl border-2 border-neutral-800 bg-neutral-900 p-4">
+                <Character char={p.char} size={72} />
+                <p className="mt-1 flex items-center gap-2 text-base font-black text-neutral-100">
+                  {p.name} <span className="text-2xl text-amber-300">{p.letter}</span>
+                </p>
+                <button
+                  type="button"
+                  onClick={() => speak(`${p.name} says ... ${p.say}!`)}
+                  className="mt-1 flex items-center gap-1 text-xs font-bold text-neutral-400 hover:text-neutral-200"
+                >
+                  <Volume2 className="h-4 w-4" /> hear my sound
+                </button>
+                <button
+                  type="button"
+                  onClick={() => buy(p)}
+                  disabled={!afford}
+                  className={[
+                    'mt-3 flex min-h-12 w-full items-center justify-center gap-2 rounded-2xl text-sm font-black',
+                    afford ? 'bg-amber-400 text-neutral-950 hover:bg-amber-300' : 'border-2 border-neutral-800 text-neutral-600',
+                  ].join(' ')}
+                >
+                  <Coins className="h-4 w-4" /> {p.price}
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      )}
+      <p className="mt-4 text-center text-xs text-neutral-600">Earn coins in Play — every right answer pays {COIN_CORRECT} coins.</p>
+    </div>
+  );
+}
+
+/* ==========================================================================
    SOUND GLYPHS — one shape per loop, legible at 40px
    ========================================================================== */
 function Glyph({ kind, color, size = 40 }) {
@@ -1081,6 +1572,12 @@ const CSS = `
   0%, 100% { filter: drop-shadow(0 0 2px rgba(252, 211, 77, 0.35)); }
   50%      { filter: drop-shadow(0 0 16px rgba(252, 211, 77, 0.95)); }
 }
+@keyframes sb-shake {
+  0%, 100% { transform: translateX(0); }
+  25% { transform: translateX(-6px); }
+  75% { transform: translateX(6px); }
+}
+.sb-shake { animation: sb-shake 260ms ease-in-out; }
 @keyframes sb-drop { from { opacity: 0; transform: translateY(-10px); } to { opacity: 1; transform: none; } }
 @keyframes sb-rise { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: none; } }
 .sb-drop { animation: sb-drop 260ms ease-out both; }
@@ -1435,8 +1932,8 @@ function Creator({ draft, setDraft, roster, onSave, onSavePlace, running }) {
    ========================================================================== */
 export default function SongBruhs() {
   const [started, setStarted] = useState(false);
-  const [tab, setTab] = useState('stage');
-  const [roster, setRoster] = useState(DEFAULT_CHARS);
+  const [tab, setTab] = useState('play');
+  const [save, setSave] = useState(loadSave);
   const [slots, setSlots] = useState(() =>
     DEFAULT_CHARS.map((c) => ({ charId: c.id, soundId: null, muted: false, solo: false })));
   const [selected, setSelected] = useState(null);
@@ -1446,6 +1943,27 @@ export default function SongBruhs() {
   const [draft, setDraft] = useState(() => ({ ...randomChar(), name: 'New Bruh' }));
   const [dragging, setDragging] = useState(null);
   const [toast, setToast] = useState(null);
+
+  const profile = save.active ? save.profiles.find((pr) => pr.id === save.active) : null;
+  useEffect(() => { persistSave(save); }, [save]);
+  const updateProfile = useCallback((fn) => {
+    setSave((sv) => ({ ...sv, profiles: sv.profiles.map((pr) => (pr.id === sv.active ? fn(pr) : pr)) }));
+  }, []);
+
+  /* the band roster: defaults + owned phoneme monsters + this kid's creations */
+  const roster = useMemo(() => {
+    const owned = profile ? PHONEMES.filter((ph) => profile.mons[ph.id]).map((ph) => ph.char) : [];
+    return DEFAULT_CHARS.concat(owned, profile ? profile.createdChars : []);
+  }, [profile]);
+
+  /* discovered combos live on the profile; hydrate on switch, write back on find */
+  useEffect(() => { setDiscovered(profile ? profile.discovered : []); }, [save.active]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    if (!profile || discovered.length === 0) return;
+    if (discovered.some((id) => !profile.discovered.includes(id))) {
+      updateProfile((pr) => ({ ...pr, discovered: Array.from(new Set(pr.discovered.concat(discovered))) }));
+    }
+  }, [discovered]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const engineRef = useRef(null);
   const pendingRef = useRef(null);
@@ -1643,7 +2161,7 @@ export default function SongBruhs() {
   /* --- creator ----------------------------------------------------------- */
   const saveChar = useCallback((place) => {
     const c = { ...draft, name: draft.name.trim() || randomName(), id: `c_${Math.random().toString(36).slice(2, 9)}` };
-    setRoster((r) => r.concat(c));
+    updateProfile((pr) => ({ ...pr, createdChars: pr.createdChars.concat(c) }));
     if (place) {
       setSlots((prev) => {
         const empty = prev.findIndex((s) => !s.soundId);
@@ -1656,7 +2174,7 @@ export default function SongBruhs() {
       setToast(`${c.name} added to the roster`);
     }
     setDraft({ ...randomChar(), name: 'New Bruh' });
-  }, [draft]);
+  }, [draft, updateProfile]);
 
   const selectedSound = selected ? SOUND_BY_ID[selected] : null;
   const dragSound = dragging ? SOUND_BY_ID[dragging] : null;
@@ -1671,18 +2189,36 @@ export default function SongBruhs() {
     );
   }
 
+  if (!profile) {
+    return (
+      <div className="min-h-screen bg-neutral-950">
+        <style>{CSS}</style>
+        <ProfileGate save={save} setSave={setSave} />
+      </div>
+    );
+  }
+
   return (
     <div className="relative min-h-screen overflow-x-hidden bg-neutral-950 pb-24 text-neutral-100">
       <style>{CSS}</style>
       <div className="pointer-events-none absolute -top-24 left-1/2 h-72 w-72 -translate-x-1/2 rounded-full bg-amber-500 opacity-10 blur-3xl" />
 
       {/* header */}
-      <header className="relative flex items-center gap-3 px-3 pt-3 sm:px-5">
-        <Music className="h-6 w-6 shrink-0 text-amber-400" />
-        <h1 className="text-lg font-black tracking-tight sm:text-2xl">SONGBRUHS</h1>
+      <header className="relative flex items-center gap-2 px-3 pt-3 sm:gap-3 sm:px-5">
+        <Music className="hidden h-6 w-6 shrink-0 text-amber-400 sm:block" />
+        <h1 className="text-base font-black tracking-tight sm:text-2xl">SONGBRUHS</h1>
         <span className="hidden text-xs font-semibold text-neutral-600 sm:inline">110 BPM · A MINOR</span>
         <div className="ml-auto flex items-center gap-2">
-          <Pulse />
+          <CoinPill coins={profile.coins} />
+          <button
+            type="button"
+            onClick={() => setSave((sv) => ({ ...sv, active: null }))}
+            className="flex h-12 w-12 items-center justify-center rounded-2xl border-2 border-neutral-800 bg-neutral-900 text-neutral-300"
+            title={`Switch player (now: ${profile.name})`}
+          >
+            <Users className="h-5 w-5" />
+          </button>
+          <span className="hidden sm:block"><Pulse /></span>
           <button
             type="button"
             onClick={() => setMasterMuted((m) => !m)}
@@ -1714,6 +2250,18 @@ export default function SongBruhs() {
       </div>
 
       <main className="relative mt-2 px-3 sm:px-5">
+        {tab === 'play' && (
+          <LearnTab profile={profile} updateProfile={updateProfile} setToast={setToast} />
+        )}
+
+        {tab === 'monsters' && (
+          <MonstersTab profile={profile} updateProfile={updateProfile} setToast={setToast} onGoShop={() => setTab('shop')} />
+        )}
+
+        {tab === 'shop' && (
+          <ShopTab profile={profile} updateProfile={updateProfile} setToast={setToast} />
+        )}
+
         {tab === 'stage' && (
           <>
             {/* stage */}
@@ -1791,6 +2339,9 @@ export default function SongBruhs() {
       {/* bottom tabs */}
       <nav className="fixed bottom-0 left-0 right-0 z-30 flex gap-2 border-t-2 border-neutral-800 bg-neutral-950 px-3 py-2 sm:px-5">
         {[
+          { k: 'play', label: 'Play', Icon: Ear },
+          { k: 'monsters', label: 'Monsters', Icon: Heart },
+          { k: 'shop', label: 'Shop', Icon: ShoppingBag },
           { k: 'stage', label: 'Stage', Icon: Music },
           { k: 'create', label: 'Create', Icon: Wand2 },
           { k: 'combos', label: 'Combos', Icon: Sparkles },
@@ -1799,14 +2350,15 @@ export default function SongBruhs() {
             key={k}
             type="button"
             onClick={() => setTab(k)}
+            aria-label={label}
             className={[
               'flex min-h-12 flex-1 items-center justify-center gap-2 rounded-2xl border-2 text-sm font-black',
               tab === k ? 'border-amber-400 bg-neutral-900 text-amber-300' : 'border-neutral-800 bg-neutral-900 text-neutral-500',
             ].join(' ')}
           >
-            <Icon className="h-4 w-4" /> {label}
+            <Icon className="h-5 w-5 shrink-0" /> <span className="hidden lg:inline">{label}</span>
             {k === 'combos' && discovered.length > 0 && (
-              <span className="rounded-full bg-neutral-800 px-2 text-xs text-neutral-300">{discovered.length}/4</span>
+              <span className="hidden rounded-full bg-neutral-800 px-2 text-xs text-neutral-300 lg:inline">{discovered.length}/4</span>
             )}
           </button>
         ))}
