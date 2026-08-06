@@ -6,7 +6,30 @@ All art is inline SVG, all audio is synthesised at runtime. No images, no audio 
 Original assets only — the loop-mixer mechanic is the reference; the characters, names,
 sound packs and combos here are all our own.
 
-## Usage
+## Run it
+
+```bash
+npm install
+npm run dev      # http://localhost:5173
+npm run build    # -> dist/
+```
+
+## Deploy (Vercel)
+
+Import the repo and pick the **Vite** preset. Everything else is auto-detected:
+
+| Setting | Value |
+| --- | --- |
+| Framework Preset | Vite |
+| Root Directory | `./` |
+| Build Command | `npm run build` |
+| Output Directory | `dist` |
+| Install Command | `npm install` |
+
+No environment variables. It is a fully static single-page app — all audio is
+generated in the browser, so there is no server side and nothing to configure.
+
+## Using the component on its own
 
 ```jsx
 import SongBruhs from './SongBruhs.jsx';
