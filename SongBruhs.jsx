@@ -16,8 +16,8 @@ const BAR_SEC = BEAT_SEC * 4;       // 2.1818
 const BOB_SEC = BEAT_SEC * 2;       // 1.0909  <- character bob period
 const STEPS = 32;                   // 16th notes across 2 bars
 
-const OUTLINE = '#17151a';
-const SW = 3.4;
+const OUTLINE = '#111111';
+const SW = 6;
 
 const FAM = {
   beats:  { key: 'beats',  label: 'BEATS',  hex: '#ef4444', dot: 'bg-red-500',    text: 'text-red-400',    ring: 'ring-red-400',    border: 'border-red-500' },
@@ -614,19 +614,14 @@ function createEngine() {
   };
 }
 
-/* ==========================================================================
-   CHARACTER ART — layered inline SVG, viewBox 0 0 100 130
-   ========================================================================== */
 const PAL_PRIMARY = ['#ef6461', '#f4a259', '#f6d365', '#8ac926', '#3ec9a7', '#4ea8de', '#9d7bea', '#ef7fae'];
 const PAL_ACCENT = ['#ffd166', '#ff8fab', '#7ae582', '#5fd0e8', '#c58cf5', '#ff9f68', '#fdfdfb', '#4c4a55'];
 const PAL_DETAIL = ['#fdfdfb', '#ffe9c9', '#2b2b33', '#ffd166', '#c1f0e0', '#bcd7ff', '#e8d7ff', '#ffd0e0'];
-
 const BODY_KINDS = ['round', 'tall', 'blob', 'hex', 'bell', 'spike'];
 const EYE_KINDS = ['two', 'cyclops', 'three', 'sleepy', 'square', 'star'];
 const MOUTH_KINDS = ['grin', 'oh', 'zig', 'smile', 'tongue', 'fangs'];
 const HEAD_KINDS = ['none', 'horns', 'antenna', 'mohawk', 'cap', 'halo'];
 const ACC_KINDS = ['none', 'scarf', 'phones', 'badge', 'wings', 'tail'];
-
 const LAYER_LABELS = {
   body: 'Body', eyes: 'Eyes', mouth: 'Mouth', head: 'Headgear', acc: 'Accessory',
 };
@@ -634,256 +629,387 @@ const LAYER_OPTIONS = {
   body: BODY_KINDS, eyes: EYE_KINDS, mouth: MOUTH_KINDS, head: HEAD_KINDS, acc: ACC_KINDS,
 };
 
-const ST = { stroke: OUTLINE, strokeWidth: SW, strokeLinejoin: 'round', strokeLinecap: 'round' };
+/* ==========================================================================
+   CHARACTER ART — geometric construction in a 200x320 space.
 
-function Body({ kind, primary }) {
-  const f = { fill: primary, ...ST };
-  switch (kind) {
-    case 'tall':
-      return <rect x="25" y="16" width="50" height="92" rx="25" {...f} />;
-    case 'blob':
-      return <path d="M50 12 C76 12 91 30 89 56 C87 82 76 108 50 108 C24 108 13 82 11 56 C9 30 24 12 50 12 Z" {...f} />;
-    case 'hex':
-      return <polygon points="50,14 84,36 84,84 50,108 16,84 16,36" {...f} />;
-    case 'bell':
-      return <path d="M50 14 C66 14 71 30 73 50 C76 74 88 106 50 106 C12 106 24 74 27 50 C29 30 34 14 50 14 Z" {...f} />;
-    case 'spike':
-      return (
-        <g>
-          <polygon points="13,50 25,41 25,63" {...f} />
-          <polygon points="87,50 75,41 75,63" {...f} />
-          <polygon points="15,80 26,72 26,92" {...f} />
-          <polygon points="85,80 74,72 74,92" {...f} />
-          <rect x="23" y="20" width="54" height="86" rx="18" {...f} />
-        </g>
-      );
-    default:
-      return <circle cx="50" cy="60" r="40" {...f} />;
-  }
+   Every part shares one coordinate space and is emitted as its own <g> so the
+   five slots stay independently swappable. Layer order, back to front:
+     feet -> body -> shoulder cap -> head -> ears -> eyes -> mouth
+          -> headgear -> accessory
+   ========================================================================== */
+const VB_W = 200;
+const VB_H = 320;
+const CX = 100;
+
+/* Body is a straight-sided trapezium. The flare is fixed: the bottom edge is
+   always 1.47x the top edge (132/90 in the canonical path), so a variant only
+   ever moves the top width and the height — never the silhouette. */
+const FLARE = 132 / 90;
+const TOP_Y = 110;      // top edge, always tucked behind the head
+const CORNER = 8;       // bottom corner radius
+
+const HEAD = { cx: CX, cy: 78, r: 58 };
+const EAR = { r: 20, inner: 11, y: 36, dx: 48 };
+const FOOT = { rx: 17, ry: 11, dx: 26, drop: 4 };
+
+const n = (v) => Math.round(v * 100) / 100;
+
+/* --- colour: one bodyColour drives body, cap, head, ears and eyelids ------ */
+function rgbOf(hex) {
+  const h = String(hex).replace('#', '');
+  const v = h.length === 3 ? h.split('').map((c) => c + c).join('') : h;
+  return [parseInt(v.slice(0, 2), 16), parseInt(v.slice(2, 4), 16), parseInt(v.slice(4, 6), 16)];
+}
+function mixTo(hex, target, amt) {
+  const [r, g, b] = rgbOf(hex);
+  const f = (c) => Math.round(c + (target - c) * amt);
+  return `#${[f(r), f(g), f(b)].map((c) => c.toString(16).padStart(2, '0')).join('')}`;
+}
+const lighten = (hex, amt) => mixTo(hex, 255, amt);
+const darken = (hex, amt) => mixTo(hex, 0, amt);
+
+/* --- geometry ------------------------------------------------------------- */
+const BODY_SHAPES = {
+  /* topW is bounded above by 96: the head half-width at y=110 is 48.37, and any
+     wider top edge would poke out from behind the head. */
+  round: { topW: 90, botY: 296 },   // canonical
+  tall: { topW: 80, botY: 312 },
+  blob: { topW: 96, botY: 286 },
+  hex: { topW: 86, botY: 300 },
+  bell: { topW: 94, botY: 290 },
+  spike: { topW: 78, botY: 306 },
+};
+
+function bodyPath(topW, botY) {
+  const botW = topW * FLARE;
+  const x1 = n(CX - topW / 2);
+  const x2 = n(CX + topW / 2);
+  const b1 = n(CX - botW / 2);
+  const b2 = n(CX + botW / 2);
+  const r = CORNER;
+  return `M ${x1} ${TOP_Y} L ${x2} ${TOP_Y} L ${b2} ${botY - r} Q ${b2} ${botY} ${n(b2 - r)} ${botY} `
+    + `L ${n(b1 + r)} ${botY} Q ${b1} ${botY} ${b1} ${botY - r} Z`;
 }
 
-function Eyes({ kind, detail }) {
-  const white = '#fdfdfb';
-  const eyeStroke = { stroke: OUTLINE, strokeWidth: 3, strokeLinejoin: 'round' };
-  switch (kind) {
-    case 'cyclops':
-      return (
-        <g>
-          <circle cx="50" cy="50" r="19" fill={white} {...eyeStroke} />
-          <circle cx="52" cy="52" r="11" fill={detail} />
-          <circle cx="52" cy="52" r="6" fill={OUTLINE} />
-          <circle cx="47" cy="46" r="3" fill={white} />
+function capPath(topW) {
+  const x1 = n(CX - topW / 2);
+  const x2 = n(CX + topW / 2);
+  return `M ${x1} ${TOP_Y} L ${x2} ${TOP_Y} L ${n(x2 + 2)} 136 Q ${CX} 158 ${n(x1 - 2)} 136 Z`;
+}
+
+/* Droopy half-lid: a cap over the top of the eye ellipse with its flat edge
+   just below centre. Endpoints sit exactly on the ellipse — the x offset is
+   solved from the ellipse equation, never eyeballed. */
+function lidGeom(cx, cy, rx, ry, lidY) {
+  const dy = lidY - cy;
+  const dx = rx * Math.sqrt(Math.max(0, 1 - (dy / ry) ** 2));
+  return { x1: n(cx - dx), x2: n(cx + dx), large: dy >= 0 ? 1 : 0 };
+}
+function lidPath(cx, cy, rx, ry, lidY) {
+  const { x1, x2, large } = lidGeom(cx, cy, rx, ry, lidY);
+  return `M ${x1} ${lidY} A ${rx} ${ry} 0 ${large} 1 ${x2} ${lidY} Z`;
+}
+
+/* Every eye variant keeps the half-lid construction; only the count, the size,
+   the lid height and the pupil shape change. */
+const EYE_SETS = {
+  two: { lidY: 84, pupil: 'round', eyes: [{ cx: 78, cy: 80, rx: 21, ry: 23 }, { cx: 122, cy: 80, rx: 21, ry: 23 }] },
+  cyclops: { lidY: 86, pupil: 'round', eyes: [{ cx: 100, cy: 80, rx: 30, ry: 32 }] },
+  three: { lidY: 83, pupil: 'round', eyes: [{ cx: 64, cy: 80, rx: 15, ry: 17 }, { cx: 100, cy: 80, rx: 15, ry: 17 }, { cx: 136, cy: 80, rx: 15, ry: 17 }] },
+  sleepy: { lidY: 93, pupil: 'round', eyes: [{ cx: 78, cy: 80, rx: 21, ry: 23 }, { cx: 122, cy: 80, rx: 21, ry: 23 }] },
+  square: { lidY: 84, pupil: 'square', eyes: [{ cx: 78, cy: 80, rx: 21, ry: 23 }, { cx: 122, cy: 80, rx: 21, ry: 23 }] },
+  star: { lidY: 80, pupil: 'star', eyes: [{ cx: 78, cy: 80, rx: 21, ry: 23 }, { cx: 122, cy: 80, rx: 21, ry: 23 }] },
+};
+
+const ST = { stroke: OUTLINE, strokeWidth: SW, strokeLinejoin: 'round', strokeLinecap: 'round' };
+const EYE_WHITE = '#fbfbf7';
+const MOUTH_DARK = '#141118';
+
+/* --- parts ---------------------------------------------------------------- */
+function Feet({ botY, accent }) {
+  const cy = botY + FOOT.drop;
+  return (
+    <g data-part="feet">
+      <ellipse cx={CX - FOOT.dx} cy={cy} rx={FOOT.rx} ry={FOOT.ry} fill={accent} {...ST} />
+      <ellipse cx={CX + FOOT.dx} cy={cy} rx={FOOT.rx} ry={FOOT.ry} fill={accent} {...ST} />
+    </g>
+  );
+}
+
+function Body({ topW, botY, body }) {
+  return (
+    <g data-part="body">
+      <path d={bodyPath(topW, botY)} fill={body} {...ST} />
+    </g>
+  );
+}
+
+function ShoulderCap({ topW, body }) {
+  return (
+    <g data-part="shoulder">
+      <path d={capPath(topW)} fill={lighten(body, 0.18)} stroke="none" />
+    </g>
+  );
+}
+
+function Head({ body }) {
+  return (
+    <g data-part="head">
+      <circle cx={HEAD.cx} cy={HEAD.cy} r={HEAD.r} fill={body} {...ST} />
+    </g>
+  );
+}
+
+function Ears({ body }) {
+  const light = lighten(body, 0.18);
+  return (
+    <g data-part="ears">
+      {[CX - EAR.dx, CX + EAR.dx].map((cx) => (
+        <g key={cx}>
+          <circle cx={cx} cy={EAR.y} r={EAR.r} fill={body} {...ST} />
+          <circle cx={cx} cy={EAR.y} r={EAR.inner} fill={light} stroke="none" />
         </g>
-      );
-    case 'three':
-      return (
-        <g>
-          {[[30, 52], [50, 41], [70, 52]].map(([cx, cy], i) => (
-            <g key={i}>
-              <circle cx={cx} cy={cy} r="9.5" fill={white} {...eyeStroke} />
-              <circle cx={cx + 1} cy={cy + 1} r="4.2" fill={OUTLINE} />
-            </g>
-          ))}
-        </g>
-      );
-    case 'sleepy':
-      return (
-        <g>
-          {[36, 64].map((cx, i) => (
-            <g key={i}>
-              <circle cx={cx} cy="52" r="13" fill={white} {...eyeStroke} />
-              <circle cx={cx + 1} cy="56" r="5" fill={OUTLINE} />
-              <path d={`M${cx - 13} 52 A13 13 0 0 1 ${cx + 13} 52 Z`} fill={OUTLINE} />
-            </g>
-          ))}
-        </g>
-      );
-    case 'square':
-      return (
-        <g>
-          {[24, 54].map((x, i) => (
-            <g key={i}>
-              <rect x={x} y="41" width="22" height="22" rx="5" fill={white} {...eyeStroke} />
-              <rect x={x + 7} y="50" width="9" height="9" rx="2" fill={OUTLINE} />
-            </g>
-          ))}
-        </g>
-      );
-    case 'star':
-      return (
-        <g>
-          {[36, 64].map((cx, i) => (
-            <path
-              key={i}
-              d={`M${cx} 37 L${cx + 4.5} 48 L${cx + 15} 52 L${cx + 4.5} 56 L${cx} 67 L${cx - 4.5} 56 L${cx - 15} 52 L${cx - 4.5} 48 Z`}
-              fill={detail}
-              {...eyeStroke}
-            />
-          ))}
-        </g>
-      );
-    default:
-      return (
-        <g>
-          {[36, 64].map((cx, i) => (
-            <g key={i}>
-              <circle cx={cx} cy="52" r="13" fill={white} {...eyeStroke} />
-              <circle cx={cx + 2} cy="54" r="8" fill={detail} />
-              <circle cx={cx + 2} cy="54" r="4.6" fill={OUTLINE} />
-              <circle cx={cx - 2.5} cy="48" r="2.8" fill={white} />
-            </g>
-          ))}
-        </g>
-      );
+      ))}
+    </g>
+  );
+}
+
+function Pupil({ kind, cx, cy, scale, detail }) {
+  const r = 10 * scale;
+  if (kind === 'square') {
+    const s = 13 * scale;
+    return (
+      <g>
+        <rect x={n(cx - s / 2)} y={n(cy - s / 2)} width={n(s)} height={n(s)} rx={n(2 * scale)} fill={detail} stroke="none" />
+        <rect x={n(cx - s / 3.4)} y={n(cy - s / 3.4)} width={n(s / 1.7)} height={n(s / 1.7)} fill={OUTLINE} stroke="none" />
+      </g>
+    );
   }
+  if (kind === 'star') {
+    const a = 12 * scale;
+    const b = 4.4 * scale;
+    const pts = [
+      [cx, cy - a], [cx + b, cy - b], [cx + a, cy], [cx + b, cy + b],
+      [cx, cy + a], [cx - b, cy + b], [cx - a, cy], [cx - b, cy - b],
+    ].map(([x, y]) => `${n(x)},${n(y)}`).join(' ');
+    return <polygon points={pts} fill={detail} stroke={OUTLINE} strokeWidth={2.4 * scale} strokeLinejoin="round" />;
+  }
+  return (
+    <g>
+      <circle cx={cx} cy={cy} r={n(r)} fill={detail} stroke="none" />
+      <circle cx={cx} cy={cy} r={n(r * 0.56)} fill={OUTLINE} stroke="none" />
+      <circle cx={n(cx - r * 0.42)} cy={n(cy - r * 0.5)} r={n(r * 0.26)} fill={EYE_WHITE} stroke="none" />
+    </g>
+  );
+}
+
+function Eyes({ kind, body, detail }) {
+  const set = EYE_SETS[kind] || EYE_SETS.two;
+  const { lidY, pupil } = set;
+  return (
+    <g data-part="eyes">
+      {/* clip ids are keyed on the eye geometry, so duplicates across characters
+          resolve to an identical shape and can safely collide */}
+      <defs>
+        {set.eyes.map((e, i) => (
+          <clipPath key={`c${i}`} id={`sb-eye-${kind}-${i}`}>
+            <ellipse cx={e.cx} cy={e.cy} rx={e.rx} ry={e.ry} />
+          </clipPath>
+        ))}
+      </defs>
+      {/* whites */}
+      {set.eyes.map((e, i) => (
+        <ellipse key={`w${i}`} cx={e.cx} cy={e.cy} rx={e.rx} ry={e.ry} fill={EYE_WHITE} stroke="none" />
+      ))}
+      {/* pupils sit under the lid so it clips them */}
+      {set.eyes.map((e, i) => (
+        <g key={`p${i}`} clipPath={`url(#sb-eye-${kind}-${i})`}>
+          <Pupil kind={pupil} cx={e.cx} cy={lidY + (e.ry - (lidY - e.cy)) * 0.44} scale={e.rx / 21} detail={detail} />
+        </g>
+      ))}
+      {/* lid, filled in the body colour */}
+      {set.eyes.map((e, i) => (
+        <path key={`l${i}`} d={lidPath(e.cx, e.cy, e.rx, e.ry, lidY)} fill={body} stroke="none" />
+      ))}
+      {/* outline redrawn on top so the lid edge reads as a hard line */}
+      {set.eyes.map((e, i) => {
+        const g = lidGeom(e.cx, e.cy, e.rx, e.ry, lidY);
+        return (
+          <g key={`o${i}`}>
+            <ellipse cx={e.cx} cy={e.cy} rx={e.rx} ry={e.ry} fill="none" {...ST} />
+            <path d={`M ${g.x1} ${lidY} L ${g.x2} ${lidY}`} fill="none" {...ST} />
+          </g>
+        );
+      })}
+    </g>
+  );
 }
 
 function SingMouth({ accent }) {
   return (
-    <g style={{ transformOrigin: '50px 74px', animation: `sb-sing ${BEAT_SEC}s ease-in-out infinite` }}>
-      <ellipse cx="50" cy="83" rx="13" ry="15" fill="#1d1a20" stroke={OUTLINE} strokeWidth={3} />
-      <rect x="39" y="70" width="22" height="5" rx="2" fill="#fdfdfb" />
-      <ellipse cx="50" cy="92" rx="7" ry="5" fill={accent} />
+    <g data-part="mouth" style={{ transformOrigin: '100px 107px', animation: `sb-sing ${BEAT_SEC}s ease-in-out infinite` }}>
+      <ellipse cx={CX} cy="119" rx="16" ry="12" fill={MOUTH_DARK} {...ST} />
+      <rect x="86" y="108" width="28" height="6" rx="2" fill={EYE_WHITE} stroke="none" />
+      <ellipse cx={CX} cy="127" rx="8" ry="4" fill={accent} stroke="none" />
     </g>
   );
 }
 
 function Mouth({ kind, accent }) {
-  const line = { stroke: OUTLINE, strokeWidth: 3.4, strokeLinecap: 'round', fill: 'none' };
+  const open = { fill: MOUTH_DARK, ...ST };
+  const line = { fill: 'none', ...ST };
+  let inner;
   switch (kind) {
     case 'oh':
-      return (
-        <g>
-          <ellipse cx="50" cy="82" rx="11" ry="13" fill="#1d1a20" stroke={OUTLINE} strokeWidth={3} />
-          <ellipse cx="50" cy="89" rx="6" ry="4" fill={accent} />
-        </g>
+      inner = (
+        <>
+          <ellipse cx={CX} cy="120" rx="14" ry="14" {...open} />
+          <ellipse cx={CX} cy="128" rx="7" ry="4" fill={accent} stroke="none" />
+        </>
       );
+      break;
     case 'zig':
-      return <polyline points="30,79 38,88 46,79 54,88 62,79 70,88" {...line} />;
+      inner = <polyline points="68,112 80,128 92,112 104,128 116,112 128,128" {...line} />;
+      break;
     case 'smile':
-      return <path d="M37 81 Q50 92 63 81" {...line} />;
+      inner = <path d="M 76 116 Q 100 134 124 116" {...line} />;
+      break;
     case 'tongue':
-      return (
-        <g>
-          <path d="M32 76 Q50 95 68 76 Z" fill="#1d1a20" stroke={OUTLINE} strokeWidth={3} strokeLinejoin="round" />
-          <path d="M43 87 Q50 99 57 87 Z" fill={accent} stroke={OUTLINE} strokeWidth={2.4} strokeLinejoin="round" />
-        </g>
+      inner = (
+        <>
+          <path d="M 68 110 Q 100 148 132 110 Z" {...open} />
+          <path d="M 86 124 Q 100 140 114 124 Z" fill={accent} stroke={OUTLINE} strokeWidth={4} strokeLinejoin="round" />
+        </>
       );
+      break;
     case 'fangs':
-      return (
-        <g>
-          <path d="M33 82 H67" {...line} />
-          <polygon points="40,82 45,82 42.5,91" fill="#fdfdfb" stroke={OUTLINE} strokeWidth={2.2} strokeLinejoin="round" />
-          <polygon points="55,82 60,82 57.5,91" fill="#fdfdfb" stroke={OUTLINE} strokeWidth={2.2} strokeLinejoin="round" />
-        </g>
+      inner = (
+        <>
+          <path d="M 68 118 H 132" {...line} />
+          <polygon points="84,118 96,118 90,134" fill={EYE_WHITE} stroke={OUTLINE} strokeWidth={4} strokeLinejoin="round" />
+          <polygon points="110,118 122,118 116,134" fill={EYE_WHITE} stroke={OUTLINE} strokeWidth={4} strokeLinejoin="round" />
+        </>
       );
-    default:
-      return (
-        <g>
-          <path d="M31 76 Q50 96 69 76 Z" fill="#1d1a20" stroke={OUTLINE} strokeWidth={3} strokeLinejoin="round" />
-          <rect x="35" y="76" width="30" height="5" rx="2" fill="#fdfdfb" />
-        </g>
+      break;
+    default: // grin
+      inner = (
+        <>
+          <path d="M 66 110 Q 100 148 134 110 Z" {...open} />
+          <rect x="74" y="110" width="52" height="9" rx="3" fill={EYE_WHITE} stroke="none" />
+        </>
       );
   }
+  return <g data-part="mouth">{inner}</g>;
 }
 
 function Headgear({ kind, accent }) {
   const f = { fill: accent, ...ST };
+  let inner = null;
   switch (kind) {
     case 'horns':
-      return (
-        <g>
-          <path d="M30 28 L23 3 L44 21 Z" {...f} />
-          <path d="M70 28 L77 3 L56 21 Z" {...f} />
-        </g>
+      inner = (
+        <>
+          <path d="M 78 32 L 66 3 L 98 24 Z" {...f} />
+          <path d="M 122 32 L 134 3 L 102 24 Z" {...f} />
+        </>
       );
+      break;
     case 'antenna':
-      return (
-        <g>
-          <path d="M50 22 L50 9" stroke={OUTLINE} strokeWidth={4} strokeLinecap="round" fill="none" />
-          <circle cx="50" cy="7" r="7" {...f} />
-        </g>
+      inner = (
+        <>
+          <path d="M 100 26 L 100 14" fill="none" {...ST} />
+          <circle cx={CX} cy="12" r="8" {...f} />
+        </>
       );
+      break;
     case 'mohawk':
-      return <polygon points="27,25 33,4 41,20 50,0 59,20 67,4 73,25" {...f} />;
+      inner = <polygon points="74,38 82,7 92,26 100,4 108,26 118,7 126,38" {...f} />;
+      break;
     case 'cap':
-      return (
-        <g>
-          <path d="M22 25 A28 28 0 0 1 78 25 Z" {...f} />
-          <rect x="14" y="22" width="72" height="9" rx="4.5" {...f} />
-        </g>
+      inner = (
+        <>
+          <path d="M 58 44 A 46 46 0 0 1 142 44 Z" {...f} />
+          <rect x="46" y="40" width="108" height="12" rx="6" {...f} />
+        </>
       );
+      break;
     case 'halo':
-      return <ellipse cx="50" cy="9" rx="22" ry="6.5" fill="none" stroke={accent} strokeWidth={6} />;
+      inner = <ellipse cx={CX} cy="14" rx="36" ry="9" fill="none" stroke={accent} strokeWidth="9" />;
+      break;
     default:
       return null;
   }
+  return <g data-part="headgear">{inner}</g>;
 }
 
-function AccBack({ kind, accent }) {
+function Accessory({ kind, accent, detail, topW }) {
   const f = { fill: accent, ...ST };
-  switch (kind) {
-    case 'wings':
-      return (
-        <g>
-          <path d="M20 54 C-3 44 -5 84 20 82 Z" {...f} />
-          <path d="M80 54 C103 44 105 84 80 82 Z" {...f} />
-        </g>
-      );
-    case 'tail':
-      return <path d="M76 100 C104 102 106 66 92 58" fill="none" stroke={accent} strokeWidth={11} strokeLinecap="round" />;
-    default:
-      return null;
-  }
-}
-
-function AccFront({ kind, accent, detail }) {
-  const f = { fill: accent, ...ST };
+  let inner = null;
   switch (kind) {
     case 'scarf':
-      return (
-        <g>
-          <rect x="22" y="86" width="56" height="13" rx="6.5" {...f} />
-          <path d="M64 96 L74 116 L62 114 Z" {...f} />
-        </g>
+      inner = (
+        <>
+          <rect x={n(CX - topW / 2 - 4)} y="140" width={n(topW + 8)} height="22" rx="11" {...f} />
+          <path d="M 128 160 L 150 206 L 126 199 Z" {...f} />
+        </>
       );
+      break;
     case 'phones':
-      return (
-        <g>
-          <path d="M18 46 A32 34 0 0 1 82 46" fill="none" stroke={OUTLINE} strokeWidth={7} strokeLinecap="round" />
-          <path d="M18 46 A32 34 0 0 1 82 46" fill="none" stroke={accent} strokeWidth={4} strokeLinecap="round" />
-          <rect x="8" y="44" width="16" height="26" rx="7" {...f} />
-          <rect x="76" y="44" width="16" height="26" rx="7" {...f} />
-        </g>
+      inner = (
+        <>
+          <path d="M 46 74 A 56 60 0 0 1 154 74" fill="none" stroke={OUTLINE} strokeWidth="14" strokeLinecap="round" />
+          <path d="M 46 74 A 56 60 0 0 1 154 74" fill="none" stroke={accent} strokeWidth="7" strokeLinecap="round" />
+          <rect x="28" y="58" width="32" height="44" rx="14" {...f} />
+          <rect x="140" y="58" width="32" height="44" rx="14" {...f} />
+        </>
       );
+      break;
     case 'badge':
-      return (
-        <g>
-          <circle cx="50" cy="95" r="10" {...f} />
-          <path d="M50 89 L52.4 93.6 L57.5 94.4 L53.8 98 L54.7 103 L50 100.6 L45.3 103 L46.2 98 L42.5 94.4 L47.6 93.6 Z" fill={detail} />
-        </g>
+      inner = (
+        <>
+          <circle cx={CX} cy="204" r="20" {...f} />
+          <polygon
+            points="100,192 104.7,201.5 115.2,203 107.6,210.4 109.4,220.9 100,216 90.6,220.9 92.4,210.4 84.8,203 95.3,201.5"
+            fill={detail}
+            stroke="none"
+          />
+        </>
       );
+      break;
+    case 'wings':
+      inner = (
+        <>
+          <path d="M 54 152 C 12 142 10 214 52 208 Z" {...f} />
+          <path d="M 146 152 C 188 142 190 214 148 208 Z" {...f} />
+        </>
+      );
+      break;
+    case 'tail':
+      inner = <path d="M 156 276 C 188 270 188 220 172 206" fill="none" stroke={accent} strokeWidth="15" strokeLinecap="round" />;
+      break;
     default:
       return null;
   }
+  return <g data-part="accessory">{inner}</g>;
 }
 
 function Character({ char, size = 96, singing = false }) {
-  const h = Math.round(size * 1.3);
+  const shape = BODY_SHAPES[char.body] || BODY_SHAPES.round;
+  const body = char.primary;
   return (
-    <svg width={size} height={h} viewBox="0 0 100 130" aria-hidden="true">
-      <ellipse cx="50" cy="122" rx="31" ry="6" fill="#000000" opacity="0.4" />
-      <AccBack kind={char.acc} accent={char.accent} />
-      <ellipse cx="11" cy="74" rx="10" ry="7" fill={char.primary} {...ST} />
-      <ellipse cx="89" cy="74" rx="10" ry="7" fill={char.primary} {...ST} />
-      <rect x="30" y="98" width="18" height="21" rx="8" fill={char.detail} {...ST} />
-      <rect x="52" y="98" width="18" height="21" rx="8" fill={char.detail} {...ST} />
-      <Body kind={char.body} primary={char.primary} />
-      <AccFront kind={char.acc} accent={char.accent} detail={char.detail} />
-      <Headgear kind={char.head} accent={char.accent} />
-      <Eyes kind={char.eyes} detail={char.detail} />
-      {singing ? <SingMouth accent={char.accent} /> : <Mouth kind={char.mouth} accent={char.accent} />}
-    </svg>
+    <div style={{ width: size, height: Math.round((size * VB_H) / VB_W) }}>
+      <svg viewBox={`0 0 ${VB_W} ${VB_H}`} width="100%" height="100%" preserveAspectRatio="xMidYMid meet" aria-hidden="true">
+        <Feet botY={shape.botY} accent={char.accent} />
+        <Body topW={shape.topW} botY={shape.botY} body={body} />
+        <ShoulderCap topW={shape.topW} body={body} />
+        <Head body={body} />
+        <Ears body={body} />
+        <Eyes kind={char.eyes} body={body} detail={char.detail} />
+        {singing ? <SingMouth accent={char.accent} /> : <Mouth kind={char.mouth} accent={char.accent} />}
+        <Headgear kind={char.head} accent={char.accent} />
+        <Accessory kind={char.acc} accent={char.accent} detail={char.detail} topW={shape.topW} />
+      </svg>
+    </div>
   );
 }
 
@@ -978,8 +1104,8 @@ function Splash({ onStart }) {
       <div className="pointer-events-none absolute h-72 w-72 rounded-full bg-amber-500 opacity-20 blur-3xl" />
       <div className="relative flex items-end justify-center gap-1">
         {DEFAULT_CHARS.slice(0, 4).map((c) => (
-          <div key={c.id} className="w-16 sm:w-20">
-            <Character char={c} size={72} />
+          <div key={c.id}>
+            <Character char={c} size={64} />
           </div>
         ))}
       </div>
@@ -1043,7 +1169,7 @@ function Slot({ index, slot, sound, singing, comboLit, onTap, selectedFamilyHex 
             : undefined
         }
       >
-        <Character char={slot.char} size={74} singing={singing} />
+        <Character char={slot.char} size={72} singing={singing} />
       </div>
       <div className="mt-1 h-10 w-full">
         {sound ? (
@@ -1211,11 +1337,11 @@ function LayerRow({ layer, draft, onPick }) {
               onClick={() => onPick(layer, opt)}
               aria-label={`${LAYER_LABELS[layer]} ${opt}`}
               className={[
-                'flex h-16 w-16 shrink-0 items-center justify-center overflow-hidden rounded-2xl border-2 bg-neutral-900',
+                'flex h-20 w-16 shrink-0 items-center justify-center overflow-hidden rounded-2xl border-2 bg-neutral-900',
                 on ? 'border-amber-300' : 'border-neutral-800 hover:border-neutral-600',
               ].join(' ')}
             >
-              <Character char={preview} size={46} />
+              <Character char={preview} size={38} />
             </button>
           );
         })}
@@ -1236,7 +1362,7 @@ function Creator({ draft, setDraft, roster, onSave, onSavePlace, running }) {
               className="sb-anim"
               style={running ? { animation: `sb-bob ${BOB_SEC}s ease-in-out infinite`, animationDelay: bobDelay } : undefined}
             >
-              <Character char={draft} size={150} singing={running} />
+              <Character char={draft} size={128} singing={running} />
             </div>
             <input
               value={draft.name}
@@ -1293,7 +1419,7 @@ function Creator({ draft, setDraft, roster, onSave, onSavePlace, running }) {
                 className="flex w-20 shrink-0 flex-col items-center rounded-2xl border-2 border-neutral-800 bg-neutral-900 p-1 hover:border-neutral-600"
                 title={`Edit a copy of ${c.name}`}
               >
-                <Character char={c} size={52} />
+                <Character char={c} size={44} />
                 <span className="w-full truncate text-center text-xs font-semibold text-neutral-500">{c.name}</span>
               </button>
             ))}
@@ -1711,7 +1837,7 @@ export default function SongBruhs() {
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-center gap-3">
-              <Character char={sheetSlot.char} size={48} />
+              <Character char={sheetSlot.char} size={40} />
               <div className="min-w-0">
                 <p className="truncate text-base font-black">{sheetSlot.char.name}</p>
                 <p className="truncate text-xs text-neutral-500">
@@ -1782,7 +1908,7 @@ export default function SongBruhs() {
                       c.id === sheetSlot.charId ? 'border-amber-300' : 'border-neutral-800',
                     ].join(' ')}
                   >
-                    <Character char={c} size={46} />
+                    <Character char={c} size={40} />
                     <span className="w-full truncate text-center text-xs text-neutral-500">{c.name}</span>
                   </button>
                 ))}
