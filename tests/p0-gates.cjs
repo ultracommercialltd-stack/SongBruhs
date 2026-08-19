@@ -25,15 +25,37 @@ const LOCKOUT_WAIT = 1800;
 const bad = [];
 const ok = (c, m) => { console.log((c ? '  ok   ' : '  FAIL ') + m); if (!c) bad.push(m); };
 
+/* Since P4 there is no difficulty setting: word questions arrive per sound as
+   that sound becomes fluent. Seed a fluent profile so these gates - which are
+   about the word prompt - actually see word questions. */
+const FLUENT = { asked: 12, right: 12, fastRight: 12, wrong: 0, totalMs: 12000, confusions: {} };
+/* Own every sound so no egg is waiting: an egg injects sound-questions for an
+   unowned grapheme, and these gates are specifically about the word prompt. */
+const EVERY_SOUND = [
+  'ph_s', 'ph_a', 'ph_t', 'ph_p', 'ph_i', 'ph_n',
+  'ph_m', 'ph_d', 'ph_g', 'ph_o', 'ph_c', 'ph_k',
+  'ph_e', 'ph_u', 'ph_r', 'ph_h', 'ph_b', 'ph_f', 'ph_l',
+];
+function fluentSave(name) {
+  const ids = EVERY_SOUND;
+  const stats = {};
+  ids.forEach((id) => { stats[id] = { ...FLUENT }; });
+  return {
+    version: 2, active: 'kid_b',
+    profiles: [{
+      id: 'kid_b', name, tier: 'A', colour: '#ef6461', coins: 10, treats: 1,
+      mons: Object.fromEntries(ids.map((id) => [id, { xp: 0 }])),
+      stats, createdChars: [], discovered: [], words: [], correct: 0,
+    }],
+  };
+}
 async function freshTierB(browser, name) {
-  const ctx = await browser.newContext({ viewport: { width: 380, height: 780 } });
+  const ctx = await browser.newContext({ viewport: { width: 380, height: 800 } });
   const p = await ctx.newPage();
   await p.goto(URL, { waitUntil: 'networkidle' });
+  await p.evaluate((sv) => localStorage.setItem('songbruhs_save_v1', JSON.stringify(sv)), fluentSave(name));
+  await p.reload({ waitUntil: 'networkidle' });
   await p.getByRole('button', { name: 'START' }).click();
-  await p.waitForSelector("text=Who's playing?");
-  await p.fill('input[aria-label="Player name"]', name);
-  await p.getByText('Big (5–7)').click();
-  await p.getByRole('button', { name: /Let's play/ }).click();
   await p.waitForSelector('[data-target]');
   return { ctx, p };
 }
@@ -110,7 +132,12 @@ async function finishQuestion(p) {
       // it was never present (whole-word match) before answering
       const revealed = await finishQuestion(p);
       if (revealed) captured++;
-      if (revealed && new RegExp(`\\b${revealed.toLowerCase()}\\b`).test(askText)) leaked++;
+      if (revealed && new RegExp(`\\b${revealed.toLowerCase()}\\b`).test(askText)) {
+        leaked++;
+        if (leaked <= 2) console.log(`      LEAK "${revealed}" in: ${askText.replace(/\n/g, ' | ').slice(0, 220)}`);
+        // any UI copy containing a prompt word is a real regression: an
+        // audio-blind child can read the answer off the screen
+      }
     }
     ok(captured >= N * 0.75, `reveal captured on most questions (${captured}/${N}) — leak check is not vacuous`);
     ok(leaked === 0, `prompt word never readable during ask (${leaked} leaks in ${N})`);
@@ -129,11 +156,18 @@ async function finishQuestion(p) {
       const wrong = await p.locator('[data-choice]').evaluateAll(
         (els, t) => els.map((e) => e.getAttribute('data-choice')).filter((id) => id !== t), target,
       );
-      await p.locator(`[data-choice="${wrong[0]}"]`).click();
-      await p.waitForTimeout(LOCKOUT_WAIT);
-      await p.locator(`[data-choice="${wrong[1]}"]`).click();
-      await waitPhase(p, 'model');
-      await p.locator(`[data-choice="${target}"]`).click();
+      /* Tap every wrong card, then the right one. The board may be two cards
+         rather than three: P4's contrast drill narrows it when a child keeps
+         confusing a pair, which is exactly what this bot looks like. */
+      for (const id of wrong) {
+        await p.locator(`[data-choice="${id}"]`).click();
+        await p.waitForTimeout(LOCKOUT_WAIT);
+      }
+      if ((await phaseOf(p)) === 'model') {
+        await p.locator(`[data-choice="${target}"]`).click();
+      } else {
+        await p.locator(`[data-choice="${target}"]`).click();
+      }
       await waitPhase(p, 'ask');
       await clearFinale(p);
     }

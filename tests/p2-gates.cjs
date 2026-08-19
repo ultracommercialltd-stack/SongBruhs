@@ -45,7 +45,7 @@ const SAVE = {
 };
 
 async function open(browser, clipIds) {
-  const ctx = await browser.newContext({ viewport: { width: 900, height: 900 }, permissions: [] });
+  const ctx = await browser.newContext({ viewport: { width: 900, height: 1000 }, permissions: [] });
   const p = await ctx.newPage();
   await p.addInitScript(() => { window.__sbSpeechLog = []; window.__sbClipLog = []; });
   await p.goto(URL, { waitUntil: 'networkidle' });
@@ -59,6 +59,18 @@ async function open(browser, clipIds) {
   await p.getByRole('button', { name: 'START' }).click();
   await p.waitForSelector('[data-target]');
   return { ctx, p };
+}
+/* Since P5 the grown-up tools live behind a hold-to-open family door. */
+async function openFamily(p, view) {
+  await p.locator('nav [aria-label="Grown-ups"]').click();
+  await p.waitForSelector('[data-hold-gate]');
+  const box = await p.locator('[data-hold-gate]').boundingBox();
+  await p.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await p.mouse.down();
+  await p.waitForTimeout(1800);
+  await p.mouse.up();
+  await p.waitForSelector('[data-family]', { timeout: 4000 });
+  if (view) { await p.getByRole('button', { name: view }).click(); await p.waitForTimeout(300); }
 }
 const logs = (p) => p.evaluate(() => ({ speech: window.__sbSpeechLog.slice(), clips: window.__sbClipLog.slice() }));
 const targetOf = (p) => p.locator('[data-target]').getAttribute('data-target');
@@ -149,11 +161,8 @@ async function answerRight(p, keepFinale) {
   console.log('\n== the recorder flow ==');
   {
     const { ctx, p } = await open(browser, ['s:ph_s']);
-    await p.locator('nav [aria-label="Create"]').click();
-    await p.waitForTimeout(300);
-    const entry = p.locator('[data-open-recorder]');
-    ok(await entry.isVisible(), 'a grown-up can find the recorder from Create');
-    await entry.click();
+    await openFamily(p, 'Voices');
+    ok((await p.locator('[data-recorder]').count()) === 1, 'a grown-up finds the recorder in the family corner');
     await p.waitForSelector('[data-recorder]');
     const done = Number(await p.locator('[data-clips-done]').getAttribute('data-clips-done'));
     ok(done === 1, `recorder shows real progress (${done} recorded)`);
@@ -166,7 +175,7 @@ async function answerRight(p, keepFinale) {
     ok(await p.locator('[data-recorder]').isVisible(), 'the recorder survives a denied mic');
     await p.getByRole('button', { name: 'Done' }).click();
     await p.waitForTimeout(300);
-    ok(!(await p.locator('[data-recorder]').count()), 'Done returns to the creator');
+    ok(!(await p.locator('[data-recorder]').count()), 'Done leaves the recorder');
     await ctx.close();
   }
 

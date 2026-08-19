@@ -1196,6 +1196,8 @@ function migrateProfile(p) {
     correct: 0,
     treats: 0,
     words: [],
+    captions: false,
+    eggFinds: {},
     ...p,
     stats: p.stats && typeof p.stats === 'object' ? p.stats : {},
   };
@@ -1224,6 +1226,7 @@ function newProfile(name, tier, colour) {
     stats: {},
     treats: 1,
     words: [],
+    eggFinds: {},
     createdChars: [],
     discovered: [],
     correct: 0,
@@ -1303,8 +1306,8 @@ function sayPhoneme(ph) {
 }
 /* Say a whole prompt. Where a recorded clip exists for the sound or word, the
    spoken carrier sentence is shortened and the clip carries the phoneme. */
-function sayPrompt(q, tier) {
-  if (tier === 'B') {
+function sayPrompt(q) {
+  if (q.word) {
     if (hasClip(`w:${q.word}`)) {
       speak('Which sound does this word start with?');
       window.setTimeout(() => playClip(`w:${q.word}`), 1400);
@@ -1313,6 +1316,7 @@ function sayPrompt(q, tier) {
     speak(`Which sound does ${q.word} start with? ... ${q.word}`);
     return 'tts';
   }
+  /* fall through to the sound prompt */
   if (hasClip(`s:${q.target.id}`)) {
     speak('Find the monster that says');
     window.setTimeout(() => playClip(`s:${q.target.id}`), 1100);
@@ -1649,11 +1653,10 @@ function MetalBadge({ xp }) {
 function ProfileGate({ save, setSave }) {
   const [creating, setCreating] = useState(save.profiles.length === 0);
   const [name, setName] = useState(save.profiles.length === 0 ? 'Player 1' : '');
-  const [tier, setTier] = useState('A');
   const [colour, setColour] = useState(PAL_PRIMARY[4]);
 
   const create = () => {
-    const p = newProfile(name.trim() || `Player ${save.profiles.length + 1}`, tier, colour);
+    const p = newProfile(name.trim() || `Player ${save.profiles.length + 1}`, 'A', colour);
     setSave((s) => ({ profiles: s.profiles.concat(p), active: p.id }));
     speak(`Hello ${p.name}! Let's play!`);
   };
@@ -1701,22 +1704,9 @@ function ProfileGate({ save, setSave }) {
               className="w-full rounded-2xl border-2 border-neutral-700 bg-neutral-950 px-4 py-3 text-center text-lg font-black text-neutral-100"
               aria-label="Player name"
             />
-            <div className="grid grid-cols-2 gap-2">
-              {[['A', 'Little (3–5)', 'Hear a sound, find the monster'], ['B', 'Big (5–7)', 'Hear a word, find its first sound']].map(([k, label, desc]) => (
-                <button
-                  key={k}
-                  type="button"
-                  onClick={() => setTier(k)}
-                  className={[
-                    'flex min-h-16 flex-col items-center justify-center rounded-2xl border-2 px-2 text-center',
-                    tier === k ? 'border-amber-300 bg-neutral-800' : 'border-neutral-700 bg-neutral-950',
-                  ].join(' ')}
-                >
-                  <span className="text-sm font-black text-neutral-100">{label}</span>
-                  <span className="text-xs text-neutral-500">{desc}</span>
-                </button>
-              ))}
-            </div>
+            <p className="text-center text-xs text-neutral-500">
+              Start with sounds; word puzzles arrive on their own as each sound clicks.
+            </p>
             <div className="grid grid-cols-8 gap-2">
               {PAL_PRIMARY.map((c) => (
                 <button
@@ -1748,6 +1738,275 @@ function ProfileGate({ save, setSave }) {
   );
 }
 
+/* ==========================================================================
+   THE QUIET TEACHER — adaptive question choice and mistake intelligence.
+
+   One number per sound per child drives everything. No dashboards, no
+   difficulty settings: the child just finds that the island offered the right
+   thing today.
+   ========================================================================== */
+const M_MAX = 5;
+const M_FLUENT = 4;          // at or above this a sound counts as known
+const IMPULSE_MS = 700;      // a wrong tap faster than this is a slip, not a gap
+const CONTRAST_CLEAN = 3;    // clean answers needed to close a contrast drill
+const CONFUSION_TRIGGER = 2; // same distractor beating the same target this often
+
+/* mastery: fast clean correct +1, slow or assisted +0.5, wrong -1, floor 0 */
+function masteryOf(stat) {
+  if (!stat || !stat.asked) return 0;
+  const m = stat.fastRight * 1 + (stat.right - stat.fastRight) * 0.5 - stat.wrong * 1;
+  return Math.max(0, Math.min(M_MAX, m));
+}
+const masteryMap = (profile) => {
+  const out = {};
+  PHONEMES.forEach((p) => { if (profile.mons[p.id]) out[p.id] = masteryOf(profile.stats[p.id]); });
+  return out;
+};
+
+/* The confusion a child keeps making: the distractor that has beaten this
+   target most often, if it has done so enough times to be a pattern. */
+function worstConfusion(profile) {
+  let worst = null;
+  Object.keys(profile.stats || {}).forEach((targetId) => {
+    if (!profile.mons[targetId]) return;
+    const conf = profile.stats[targetId].confusions || {};
+    Object.keys(conf).forEach((otherId) => {
+      if (!profile.mons[otherId]) return;
+      if (conf[otherId] < CONFUSION_TRIGGER) return;
+      if (!worst || conf[otherId] > worst.count) worst = { targetId, otherId, count: conf[otherId] };
+    });
+  });
+  return worst;
+}
+
+/* Weighted pick: mostly wobbly sounds, some of the newest, a little
+   maintenance of what is already known. */
+function pickTarget(profile, lastTargetId) {
+  const m = masteryMap(profile);
+  const ids = Object.keys(m);
+  if (!ids.length) return PHONEMES[0].id;
+  const avail = ids.length > 1 ? ids.filter((id) => id !== lastTargetId) : ids;
+  const wobbly = avail.filter((id) => m[id] > 0 && m[id] < M_FLUENT);
+  const fresh = avail.filter((id) => m[id] === 0);
+  const known = avail.filter((id) => m[id] >= M_FLUENT);
+  const roll = Math.random();
+  let pool;
+  if (roll < 0.6) pool = wobbly.length ? wobbly : (fresh.length ? fresh : known);
+  else if (roll < 0.8) pool = fresh.length ? fresh : (wobbly.length ? wobbly : known);
+  else pool = known.length ? known : (wobbly.length ? wobbly : fresh);
+  if (!pool || !pool.length) pool = avail;
+  return pool[Math.floor(Math.random() * pool.length)];
+}
+
+/* Tier is no longer a parent setting: word questions mix in per sound as that
+   sound becomes fluent, so the game finds the level instead of being told. */
+function wantsWordQuestion(profile, targetId) {
+  if (profile.tier === 'B') return true;
+  return masteryOf(profile.stats[targetId]) >= M_FLUENT;
+}
+
+/* Curriculum unlocks follow mastery, not the wallet: the shop only offers the
+   next monster once the child is fluent in three of the sounds they own. */
+function fluentCount(profile) {
+  return Object.values(masteryMap(profile)).filter((v) => v >= M_FLUENT).length;
+}
+function shopUnlocked(profile) {
+  return fluentCount(profile) >= 3;
+}
+
+/* ==========================================================================
+   NEW ARRIVALS — GPC sets 2-4 arrive as eggs that hum their sound.
+
+   The audit's content cliff: a motivated child owned the whole catalogue in
+   one sitting. New sounds now arrive as events rather than purchases — an egg
+   appears, hums, and hatches once the child has found its sound three times.
+   ========================================================================== */
+const HATCH_FINDS = 3;
+
+/* Phase 2 order, continued. Colours and parts are chosen so each set reads as
+   a family without repeating an existing monster. */
+const SET_2 = [
+  { id: 'ph_m', letter: 'm', say: 'mmmm', name: 'Mumbo', words: ['man', 'map', 'moon', 'milk'],
+    char: { id: 'ph_m', name: 'Mumbo', body: 'bell', eyes: 'sleepy', mouth: 'smile', head: 'horns', acc: 'scarf', primary: '#e07a5f', accent: '#f2cc8f', detail: '#2b2b33' } },
+  { id: 'ph_d', letter: 'd', say: 'd', name: 'Didi', words: ['dog', 'dad', 'duck', 'dish'],
+    char: { id: 'ph_d', name: 'Didi', body: 'round', eyes: 'three', mouth: 'grin', head: 'antenna', acc: 'badge', primary: '#7f9cf5', accent: '#c3dafe', detail: '#2b2b33' } },
+  { id: 'ph_g', letter: 'g', say: 'g', name: 'Gogo', words: ['goat', 'gate', 'gum', 'garden'],
+    char: { id: 'ph_g', name: 'Gogo', body: 'blob', eyes: 'two', mouth: 'tongue', head: 'mohawk', acc: 'tail', primary: '#68d391', accent: '#f6e05e', detail: '#2b2b33' } },
+  { id: 'ph_o', letter: 'o', say: 'o', name: 'Ollo', words: ['octopus', 'olive', 'ostrich', 'orange'],
+    char: { id: 'ph_o', name: 'Ollo', body: 'hex', eyes: 'cyclops', mouth: 'oh', head: 'halo', acc: 'none', primary: '#f6ad55', accent: '#fefcbf', detail: '#2b2b33' } },
+  { id: 'ph_c', letter: 'c', say: 'c', name: 'Kiko', words: ['cat', 'cup', 'car', 'castle'],
+    char: { id: 'ph_c', name: 'Kiko', body: 'spike', eyes: 'square', mouth: 'fangs', head: 'cap', acc: 'wings', primary: '#b794f4', accent: '#e9d8fd', detail: '#2b2b33' } },
+  { id: 'ph_k', letter: 'k', say: 'k', name: 'Kappa', words: ['king', 'kite', 'key', 'kitten'],
+    char: { id: 'ph_k', name: 'Kappa', body: 'tall', eyes: 'star', mouth: 'zig', head: 'none', acc: 'phones', primary: '#4fd1c5', accent: '#b2f5ea', detail: '#2b2b33' } },
+];
+const SET_3 = [
+  { id: 'ph_e', letter: 'e', say: 'e', name: 'Ellie', words: ['egg', 'elephant', 'engine', 'exit'],
+    char: { id: 'ph_e', name: 'Ellie', body: 'round', eyes: 'sleepy', mouth: 'oh', head: 'antenna', acc: 'scarf', primary: '#fc8181', accent: '#fed7d7', detail: '#2b2b33' } },
+  { id: 'ph_u', letter: 'u', say: 'u', name: 'Umbo', words: ['umbrella', 'up', 'under', 'uncle'],
+    char: { id: 'ph_u', name: 'Umbo', body: 'bell', eyes: 'two', mouth: 'grin', head: 'cap', acc: 'badge', primary: '#63b3ed', accent: '#bee3f8', detail: '#2b2b33' } },
+  { id: 'ph_r', letter: 'r', say: 'rrrr', name: 'Rara', words: ['rat', 'run', 'rock', 'rabbit'],
+    char: { id: 'ph_r', name: 'Rara', body: 'spike', eyes: 'star', mouth: 'fangs', head: 'mohawk', acc: 'tail', primary: '#f687b3', accent: '#fed7e2', detail: '#2b2b33' } },
+  { id: 'ph_h', letter: 'h', say: 'h', name: 'Hooha', words: ['hat', 'hop', 'house', 'hand'],
+    char: { id: 'ph_h', name: 'Hooha', body: 'blob', eyes: 'three', mouth: 'smile', head: 'halo', acc: 'wings', primary: '#9ae6b4', accent: '#f0fff4', detail: '#2b2b33' } },
+];
+const SET_4 = [
+  { id: 'ph_b', letter: 'b', say: 'b', name: 'Bobo', words: ['bat', 'bus', 'ball', 'button'],
+    char: { id: 'ph_b', name: 'Bobo', body: 'hex', eyes: 'cyclops', mouth: 'tongue', head: 'horns', acc: 'phones', primary: '#f6e05e', accent: '#2d3748', detail: '#ffffff' } },
+  { id: 'ph_f', letter: 'f', say: 'ffff', name: 'Fofo', words: ['fish', 'fan', 'fox', 'finger'],
+    char: { id: 'ph_f', name: 'Fofo', body: 'tall', eyes: 'square', mouth: 'zig', head: 'antenna', acc: 'none', primary: '#4299e1', accent: '#ebf8ff', detail: '#2b2b33' } },
+  { id: 'ph_l', letter: 'l', say: 'llll', name: 'Lulu', words: ['leg', 'lamp', 'log', 'lemon'],
+    char: { id: 'ph_l', name: 'Lulu', body: 'round', eyes: 'two', mouth: 'oh', head: 'mohawk', acc: 'scarf', primary: '#ed8936', accent: '#feebc8', detail: '#2b2b33' } },
+];
+
+/* A set unlocks when the child is fluent in most of the previous one, so the
+   curriculum paces itself to the learner rather than to the wallet. */
+const GPC_SETS = [
+  { id: 'set1', label: 'First sounds', members: PHONEMES.map((p) => p.id), needFluent: 0 },
+  { id: 'set2', label: 'Next sounds', members: SET_2.map((p) => p.id), needFluent: 4 },
+  { id: 'set3', label: 'More sounds', members: SET_3.map((p) => p.id), needFluent: 8 },
+  { id: 'set4', label: 'Last sounds', members: SET_4.map((p) => p.id), needFluent: 11 },
+];
+
+/* Register the new monsters. Everything downstream — chants, questions, the
+   shop, the parent card — reads from PHONEMES, so this is the only place a new
+   set has to be added. */
+[].concat(SET_2, SET_3, SET_4).forEach((ph, i) => {
+  ph.price = 40 + i * 5;
+  PHONEMES.push(ph);
+  PHONEME_BY_ID[ph.id] = ph;
+});
+
+/* Which set a sound belongs to, and whether the child has reached it. */
+function setOf(phId) {
+  return GPC_SETS.find((s) => s.members.indexOf(phId) !== -1) || GPC_SETS[0];
+}
+function setReached(profile, set) {
+  return fluentCount(profile) >= set.needFluent;
+}
+
+/* The next egg: the first sound the child does not own, from a set they have
+   reached. Eggs hum, and hatch after the child finds the sound HATCH_FINDS
+   times in play. */
+function nextEgg(profile) {
+  for (const set of GPC_SETS) {
+    if (!setReached(profile, set)) return null;
+    for (const id of set.members) {
+      if (!profile.mons[id]) return { id, set };
+    }
+  }
+  return null;
+}
+const eggFinds = (profile, id) => (profile.eggFinds || {})[id] || 0;
+
+/* ==========================================================================
+   THE FAMILY CORNER — everything that is not for a four-year-old, behind a
+   hold-to-open gate: the parent card, the voice recorder, the character
+   creator, and player switching.
+   ========================================================================== */
+const HOLD_MS = 1500;
+
+function HoldGate({ onOpen }) {
+  const [held, setHeld] = useState(0);
+  const timer = useRef(null);
+  const start = () => {
+    clearInterval(timer.current);
+    const t0 = performance.now();
+    timer.current = setInterval(() => {
+      const pct = Math.min(1, (performance.now() - t0) / HOLD_MS);
+      setHeld(pct);
+      if (pct >= 1) { clearInterval(timer.current); setHeld(0); onOpen(); }
+    }, 50);
+  };
+  const stop = () => { clearInterval(timer.current); setHeld(0); };
+  useEffect(() => () => clearInterval(timer.current), []);
+  return (
+    <div className="mx-auto max-w-lg text-center">
+      <p className="text-lg font-black text-neutral-200">Grown-ups only</p>
+      <p className="mt-1 text-sm text-neutral-500">Press and hold the button to open.</p>
+      <button
+        type="button"
+        data-hold-gate="1"
+        onPointerDown={start}
+        onPointerUp={stop}
+        onPointerLeave={stop}
+        onPointerCancel={stop}
+        className="relative mt-5 flex min-h-20 w-full touch-none items-center justify-center overflow-hidden rounded-3xl border-2 border-neutral-700 bg-neutral-900 text-base font-black text-neutral-200"
+      >
+        <span className="absolute left-0 top-0 h-full bg-amber-400 opacity-30" style={{ width: `${Math.round(held * 100)}%` }} />
+        <span className="relative flex items-center gap-2"><Lock className="h-5 w-5" /> Hold to open</span>
+      </button>
+    </div>
+  );
+}
+
+/* Ten seconds of reading, no charts. Knows / improving / practising, plus one
+   thing to try away from the screen. */
+function ParentCard({ profile }) {
+  const rows = PHONEMES.filter((ph) => profile.mons[ph.id]).map((ph) => {
+    const st = profile.stats[ph.id];
+    const m = masteryOf(st);
+    const asked = st ? st.asked : 0;
+    const acc = asked ? Math.round((st.right / asked) * 100) : null;
+    let band = 'new';
+    if (m >= M_FLUENT) band = 'knows';
+    else if (asked >= 4 && acc !== null && acc >= 60) band = 'improving';
+    else if (asked >= 4) band = 'practising';
+    return { ph, m, asked, acc, band };
+  });
+  const by = (b) => rows.filter((r) => r.band === b);
+  const practising = by('practising');
+  const answered = rows.reduce((n, r) => n + r.asked, 0);
+  const conf = worstConfusion(profile);
+  const tipSound = practising[0] || by('improving')[0] || rows[0];
+
+  const Band = ({ title, colour, list, empty }) => (
+    <div className="mt-4">
+      <p className={`text-xs font-black tracking-widest ${colour}`}>{title}</p>
+      {list.length === 0 ? (
+        <p className="mt-1 text-sm text-neutral-600">{empty}</p>
+      ) : (
+        <div className="mt-2 flex flex-wrap gap-2">
+          {list.map((r) => (
+            <span key={r.ph.id} className="flex items-center gap-2 rounded-2xl border-2 border-neutral-800 bg-neutral-950 py-1 pl-2 pr-3">
+              <span className="text-2xl font-black text-neutral-100">{r.ph.letter}</span>
+              <span className="text-xs text-neutral-500">{r.acc === null ? 'not tried' : `${r.acc}%`}</span>
+            </span>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+
+  return (
+    <div className="mx-auto max-w-lg" data-parent-card={answered}>
+      <p className="text-xl font-black text-neutral-50">{profile.name}&rsquo;s reading</p>
+      <p className="mt-1 text-sm text-neutral-500">
+        {answered} sounds answered · {(profile.words || []).length} words built on the stage
+      </p>
+
+      <Band title="KNOWS" colour="text-green-400" list={by('knows')} empty="Nothing mastered yet — that is what the next few rounds are for." />
+      <Band title="IMPROVING" colour="text-amber-300" list={by('improving')} empty="Nothing in progress right now." />
+      <Band title="NEEDS PRACTICE" colour="text-red-400" list={practising} empty="Nothing is sticking out as hard." />
+      <Band title="NOT MET YET" colour="text-neutral-500" list={by('new')} empty="Every sound they own has been tried." />
+
+      <div className="mt-5 rounded-3xl border-2 border-amber-300 bg-neutral-900 p-4">
+        <p className="text-xs font-black tracking-widest text-amber-300">TRY THIS AT DINNER</p>
+        <p className="mt-2 text-sm text-neutral-200">
+          {conf
+            ? `${profile.name} sometimes hears “${PHONEME_BY_ID[conf.targetId].letter}” and “${PHONEME_BY_ID[conf.otherId].letter}” as the same sound. Say both slowly and ask which one starts “${PHONEME_BY_ID[conf.targetId].words[0]}”.`
+            : tipSound
+              ? `Ask ${profile.name} to find three things that start with “${tipSound.ph.letter}” — like ${tipSound.ph.words.slice(0, 2).join(' and ')}.`
+              : 'Play a round together and ask them to say each sound out loud with the monster.'}
+        </p>
+      </div>
+
+      <p className="mt-4 text-xs text-neutral-600">
+        Everything stays on this device. Nothing is uploaded, and there is nothing to buy.
+      </p>
+    </div>
+  );
+}
+
 /* --- Play tab: rounds of five, ending in a live band performance ---------- */
 const LOCKOUT_MS = 1000;   // pause after a wrong tap: interrupts machine-gun guessing
 const FAST_MS = 3000;      // a clean correct under this counts as fluent
@@ -1760,25 +2019,30 @@ function metalFor(profile, charId) {
   return owned ? metalOf(owned.xp).key : null;
 }
 
-function makeQuestion(profile, lastTargetId, forcedId) {
-  const owned = PHONEMES.filter((p) => profile.mons[p.id]);
-  let target;
-  if (forcedId && PHONEME_BY_ID[forcedId] && profile.mons[forcedId]) {
-    target = PHONEME_BY_ID[forcedId];
-  } else {
-    const pool = owned.filter((p) => p.id !== lastTargetId);
-    const src = pool.length ? pool : owned;
-    target = src[Math.floor(Math.random() * src.length)];
+function makeQuestion(profile, lastTargetId, forcedId, drill) {
+  /* a contrast drill narrows the board to just the two sounds being confused,
+     so the child is choosing between them and nothing else */
+  if (drill) {
+    const target = PHONEME_BY_ID[drill.targetId];
+    const other = PHONEME_BY_ID[drill.otherId];
+    if (target && other) {
+      return { target, word: null, drill: true, choices: shuffleArr([target, other]) };
+    }
   }
+  const useId = (forcedId && PHONEME_BY_ID[forcedId])
+    ? forcedId
+    : pickTarget(profile, lastTargetId);
+  const target = PHONEME_BY_ID[useId] || PHONEMES[0];
   const others = shuffleArr(PHONEMES.filter((p) => p.id !== target.id)).slice(0, 2);
+  const asWord = wantsWordQuestion(profile, target.id);
   return {
     target,
-    word: profile.tier === 'B' ? target.words[Math.floor(Math.random() * target.words.length)] : null,
+    word: asWord ? target.words[Math.floor(Math.random() * target.words.length)] : null,
     choices: shuffleArr([target, ...others]),
   };
 }
-function promptFor(q, tier) {
-  return tier === 'B'
+function promptFor(q) {
+  return q.word
     ? `Which sound does ${q.word} start with? ... ${q.word}`
     : `Find the monster that says ... ${q.target.say}`;
 }
@@ -1828,8 +2092,9 @@ function Finale({ profile, coins, onAgain }) {
   );
 }
 
-function LearnTab({ profile, updateProfile, setToast, sfx, onPerform, onStopPerform }) {
+function LearnTab({ profile, updateProfile, setToast, sfx, onPerform, onStopPerform, captions }) {
   const flagRef = useRef([]);            // missed sounds queued to return: {id, countdown}
+  const drillRef = useRef(null);         // {targetId, otherId, clean} contrast drill in progress
   const [q, setQ] = useState(() => makeQuestion(profile, null, null));
   const [phaseState, setPhaseState] = useState('ask');   // ask | model | correct | finale
   const [wrongCount, setWrongCount] = useState(0);
@@ -1846,7 +2111,7 @@ function LearnTab({ profile, updateProfile, setToast, sfx, onPerform, onStopPerf
   useEffect(() => {
     if (phaseState !== 'ask') return;
     askedAtRef.current = performance.now();
-    sayPrompt(q, profile.tier);
+    sayPrompt(q);
   }, [q, phaseState]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const startRound = useCallback(() => {
@@ -1874,10 +2139,31 @@ function LearnTab({ profile, updateProfile, setToast, sfx, onPerform, onStopPerf
       setPhaseState('finale');
       return;
     }
+    /* a contrast drill runs until the pair is clean, then hands back */
+    if (drillRef.current && drillRef.current.clean >= CONTRAST_CLEAN) {
+      const solved = drillRef.current;
+      updateProfile((pr) => {
+        const st = statOf(pr, solved.targetId);
+        const conf = { ...st.confusions };
+        delete conf[solved.otherId];
+        return { ...pr, stats: { ...pr.stats, [solved.targetId]: { ...st, confusions: conf } } };
+      });
+      drillRef.current = null;
+    }
+    if (!drillRef.current) {
+      const conf = worstConfusion(profile);
+      if (conf) drillRef.current = { ...conf, clean: 0 };
+    }
     flagRef.current.forEach((f) => { f.countdown -= 1; });
     const due = flagRef.current.find((f) => f.countdown <= 0);
     if (due) flagRef.current = flagRef.current.filter((f) => f !== due);
-    setQ((old) => makeQuestion(profile, old.target.id, due ? due.id : null));
+    /* every few questions the waiting egg's sound is the target, so a new
+       sound is met in play rather than bought */
+    const egg = nextEgg(profile);
+    /* One question in five, not one in three: an egg should hatch within a
+       sitting without stealing practice from the sounds being consolidated. */
+    const eggTurn = egg && !drillRef.current && !due && Math.random() < 0.2;
+    setQ((old) => makeQuestion(profile, old.target.id, eggTurn ? egg.id : (due ? due.id : null), drillRef.current));
     setPhaseState('ask');
     setWrongCount(0);
     setWrongId(null);
@@ -1885,11 +2171,43 @@ function LearnTab({ profile, updateProfile, setToast, sfx, onPerform, onStopPerf
     firstTapMsRef.current = null;
   }, [profile, updateProfile, onPerform]);
 
+  /* An unowned sound can still appear as a distractor; finding it correctly is
+     what hatches its egg. Progress is counted on the profile, not in the round. */
+  const noteEggFind = (id) => {
+    updateProfile((pr) => {
+      if (pr.mons[id]) return pr;
+      const finds = { ...(pr.eggFinds || {}) };
+      finds[id] = (finds[id] || 0) + 1;
+      if (finds[id] < HATCH_FINDS) return { ...pr, eggFinds: finds };
+      delete finds[id];
+      return { ...pr, eggFinds: finds, mons: { ...pr.mons, [id]: { xp: 0 } } };
+    });
+  };
+
   const finishCorrect = (p, clean) => {
     setPhaseState('correct');
+    if (drillRef.current) drillRef.current.clean = clean ? drillRef.current.clean + 1 : 0;
     const ms = firstTapMsRef.current == null ? FAST_MS : firstTapMsRef.current;
     const coins = clean ? COIN_CORRECT : 1;
-    const prevXp = profile.mons[p.id].xp;
+    const owned = profile.mons[p.id];
+    if (!owned) {
+      /* this was the egg's sound: count the find, hatch at three */
+      const finds = eggFinds(profile, p.id) + 1;
+      noteEggFind(p.id);
+      setRoundCoins((c) => c + coins);
+      updateProfile((pr) => ({ ...pr, coins: pr.coins + coins, correct: pr.correct + 1 }));
+      if (finds >= HATCH_FINDS) {
+        sfx.levelup();
+        speak(`It hatched! Say hello to ${p.name}!`);
+        setToast(`${p.name} hatched!`);
+      } else {
+        sfx.chime();
+        setToast(`The egg wobbled! ${HATCH_FINDS - finds} to go`);
+      }
+      timer.current = setTimeout(advance, CELEBRATE_MS + (finds >= HATCH_FINDS ? 700 : 0));
+      return;
+    }
+    const prevXp = owned.xp;
     const grew = metalOf(prevXp + 1).key !== metalOf(prevXp).key;
     setRoundCoins((c) => c + coins);
     updateProfile((pr) => {
@@ -1898,7 +2216,7 @@ function LearnTab({ profile, updateProfile, setToast, sfx, onPerform, onStopPerf
         ...pr,
         coins: pr.coins + coins,
         correct: pr.correct + 1,
-        mons: { ...pr.mons, [p.id]: { xp: pr.mons[p.id].xp + 1 } },
+        mons: { ...pr.mons, [p.id]: { xp: (pr.mons[p.id] ? pr.mons[p.id].xp : 0) + 1 } },
         stats: {
           ...pr.stats,
           [p.id]: {
@@ -1935,11 +2253,13 @@ function LearnTab({ profile, updateProfile, setToast, sfx, onPerform, onStopPerf
       });
       speak("That's it!");
       window.setTimeout(() => sayPhoneme(q.target), 800);
+      if (drillRef.current) drillRef.current.clean = 0;
       timer.current = setTimeout(advance, CELEBRATE_MS);
       return;
     }
 
-    if (firstTapMsRef.current == null) firstTapMsRef.current = performance.now() - askedAtRef.current;
+    const tapMs = performance.now() - askedAtRef.current;
+    if (firstTapMsRef.current == null) firstTapMsRef.current = tapMs;
 
     if (p.id === q.target.id) {
       finishCorrect(p, wrongCount === 0);
@@ -1950,18 +2270,28 @@ function LearnTab({ profile, updateProfile, setToast, sfx, onPerform, onStopPerf
     setWrongCount(wc);
     setWrongId(p.id);
     setLocked(true);
-    updateProfile((pr) => {
-      const s = statOf(pr, q.target.id);
-      return {
-        ...pr,
-        stats: {
-          ...pr.stats,
-          [q.target.id]: { ...s, confusions: { ...s.confusions, [p.id]: (s.confusions[p.id] || 0) + 1 } },
-        },
-      };
-    });
-    if (wc >= 2) {
+    /* An impulse tap (faster than a child can have listened) is a slip, not a
+       gap in knowledge: it still ends the question's full reward, but it does
+       not teach the model that the sound is unknown. */
+    const impulse = tapMs < IMPULSE_MS;
+    if (!impulse) {
+      updateProfile((pr) => {
+        const s = statOf(pr, q.target.id);
+        return {
+          ...pr,
+          stats: {
+            ...pr.stats,
+            [q.target.id]: { ...s, confusions: { ...s.confusions, [p.id]: (s.confusions[p.id] || 0) + 1 } },
+          },
+        };
+      });
+    }
+    /* On a two-card contrast drill there is no second chance to give: the only
+       other card IS the answer, so tapping it would pay for nothing. One wrong
+       goes straight to the modelled completion. */
+    if (wc >= 2 || q.drill) {
       flagRef.current.push({ id: q.target.id, countdown: 2 });
+      if (drillRef.current) drillRef.current.clean = 0;
       speak(`Listen! Tap ${q.target.name}, who says`);
       window.setTimeout(() => sayPhoneme(q.target), 1200);
       timer.current = setTimeout(() => {
@@ -1975,7 +2305,7 @@ function LearnTab({ profile, updateProfile, setToast, sfx, onPerform, onStopPerf
       timer.current = setTimeout(() => {
         setWrongId(null);
         setLocked(false);
-        sayPrompt(q, profile.tier);
+        sayPrompt(q);
       }, LOCKOUT_MS + 500);
     }
   };
@@ -1984,18 +2314,18 @@ function LearnTab({ profile, updateProfile, setToast, sfx, onPerform, onStopPerf
     return <Finale profile={profile} coins={roundCoins} onAgain={startRound} />;
   }
 
-  const revealWord = phaseState === 'correct' && profile.tier === 'B' && q.word;
+  const revealWord = phaseState === 'correct' && Boolean(q.word);
 
   return (
     <div className="mx-auto max-w-lg">
       <div className="flex items-center justify-between gap-3">
         <button
           type="button"
-          onClick={() => sayPrompt(q, profile.tier)}
+          onClick={() => sayPrompt(q)}
           aria-label="Hear it again"
-          className="flex min-h-12 items-center gap-2 rounded-2xl border-2 border-neutral-700 bg-neutral-900 px-4 text-sm font-black text-neutral-100 hover:border-amber-300"
+          className="flex h-16 w-16 items-center justify-center rounded-full border-2 border-amber-300 bg-neutral-900 text-amber-300 hover:bg-neutral-800"
         >
-          <RotateCcw className="h-4 w-4 text-amber-300" /> Hear it again
+          <Volume2 className="h-8 w-8" />
         </button>
         {/* round trail: five slots filling toward the show */}
         <div className="flex items-center gap-1.5" data-trail={done}>
@@ -2018,14 +2348,17 @@ function LearnTab({ profile, updateProfile, setToast, sfx, onPerform, onStopPerf
           </p>
         ) : phaseState === 'model' ? (
           <p className="text-lg font-black text-amber-300">Tap the monster that sings the sound!</p>
-        ) : profile.tier === 'B' ? (
+        ) : q.drill ? (
+          <p className="text-lg font-black text-amber-300">Just these two. Which one says it?</p>
+        ) : q.word ? (
           <p className="text-lg font-black text-neutral-100">Listen! What sound does the word start with?</p>
         ) : (
           <p className="text-lg font-black text-neutral-100">Find the monster that says the sound!</p>
         )}
-        {phaseState === 'ask' && (
-          <p className="mt-1 text-xs text-neutral-500">Tap “Hear it again” as many times as you like</p>
+        {captions && phaseState === 'ask' && (
+          <p className="mt-2 text-5xl font-black text-amber-300" data-caption={q.target.letter}>{q.target.letter}</p>
         )}
+
       </div>
 
       <div className="mt-3 grid grid-cols-3 gap-2" data-target={q.target.id} data-phase={phaseState}>
@@ -2064,6 +2397,42 @@ function LearnTab({ profile, updateProfile, setToast, sfx, onPerform, onStopPerf
 }
 
 /* --- Monsters tab: roster, feeding, metals -------------------------------- */
+function EggCard({ profile }) {
+  const egg = nextEgg(profile);
+  if (!egg) return null;
+  const ph = PHONEME_BY_ID[egg.id];
+  const finds = eggFinds(profile, egg.id);
+  return (
+    <button
+      type="button"
+      data-egg={egg.id}
+      data-egg-finds={finds}
+      onClick={() => sayPhoneme(ph)}
+      aria-label="A wobbling egg"
+      className="sb-anim flex min-h-24 items-center gap-3 rounded-3xl border-2 border-amber-300 bg-neutral-900 p-3 text-left"
+      style={{ animation: `sb-bob ${BOB_SEC * 2}s ease-in-out infinite` }}
+    >
+      <svg width="52" height="66" viewBox="0 0 100 130" aria-hidden="true">
+        <ellipse cx="50" cy="78" rx="42" ry="50" fill="#f6e7c9" stroke={OUTLINE} strokeWidth="6" />
+        <path d="M 16 78 Q 34 66 50 78 Q 66 90 84 78" fill="none" stroke={OUTLINE} strokeWidth="5" strokeLinecap="round" />
+        <circle cx="34" cy="52" r="7" fill="#e6cfa5" />
+        <circle cx="64" cy="98" r="9" fill="#e6cfa5" />
+      </svg>
+      <div className="min-w-0 flex-1">
+        <p className="text-base font-black text-amber-300">Something is in here…</p>
+        <p className="mt-1 text-xs text-neutral-400">
+          It hums when you touch it. Find its sound {HATCH_FINDS} times in Play to hatch it.
+        </p>
+        <div className="mt-2 flex gap-1">
+          {Array.from({ length: HATCH_FINDS }, (_, i) => (
+            <span key={i} className={`h-3 w-8 rounded-full ${i < finds ? 'bg-amber-300' : 'bg-neutral-800'}`} />
+          ))}
+        </div>
+      </div>
+    </button>
+  );
+}
+
 function MonstersTab({ profile, updateProfile, setToast, onGoShop, sfx }) {
   const treats = profile.treats || 0;
   const feed = (p) => {
@@ -2081,9 +2450,13 @@ function MonstersTab({ profile, updateProfile, setToast, onGoShop, sfx }) {
 
   return (
     <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+      <EggCard profile={profile} />
       {PHONEMES.map((p) => {
         const owned = profile.mons[p.id];
         if (!owned) {
+          /* only the sound the shop is currently offering shows as a locked
+             card; everything further out is not yet part of the child's world */
+          if (!setReached(profile, setOf(p.id))) return null;
           return (
             <button
               key={p.id}
@@ -2128,17 +2501,19 @@ function MonstersTab({ profile, updateProfile, setToast, onGoShop, sfx }) {
               <button
                 type="button"
                 onClick={() => sayPhoneme(p)}
-                className="flex min-h-12 items-center justify-center gap-1 rounded-2xl border-2 border-neutral-700 text-xs font-black text-neutral-200 hover:border-neutral-500"
+                aria-label={`Hear ${p.name}`}
+                className="flex min-h-12 items-center justify-center gap-1 rounded-2xl border-2 border-neutral-700 text-neutral-200 hover:border-neutral-500"
               >
-                <Volume2 className="h-4 w-4" /> Hear
+                <Volume2 className="h-5 w-5" />
               </button>
               <button
                 type="button"
                 onClick={() => feed(p)}
+                aria-label={`Feed ${p.name}`}
                 disabled={!nm || treats < 1}
                 className="flex min-h-12 items-center justify-center gap-1 rounded-2xl bg-amber-400 text-xs font-black text-neutral-950 hover:bg-amber-300 disabled:opacity-40"
               >
-                <Cookie className="h-4 w-4" /> Feed ({treats})
+                <Cookie className="h-5 w-5" /> {treats}
               </button>
             </div>
           </div>
@@ -2150,7 +2525,9 @@ function MonstersTab({ profile, updateProfile, setToast, onGoShop, sfx }) {
 
 /* --- Shop tab -------------------------------------------------------------- */
 function ShopTab({ profile, updateProfile, setToast }) {
+  const unlocked = shopUnlocked(profile);
   const buy = (p) => {
+    if (!unlocked) { speak('Practise your sounds a bit more and a new friend will arrive!'); return; }
     if (profile.coins < p.price) { speak('Not enough coins yet! Play to earn more.'); return; }
     updateProfile((pr) => ({
       ...pr,
@@ -2161,19 +2538,25 @@ function ShopTab({ profile, updateProfile, setToast }) {
     window.setTimeout(() => sayPhoneme(p), 900);
     setToast(`${p.name} joined your band!`);
   };
-  const locked = PHONEMES.filter((p) => !profile.mons[p.id]);
+  const locked = PHONEMES.filter((p) => !profile.mons[p.id] && setReached(profile, setOf(p.id)));
 
   return (
     <div>
       {locked.length === 0 ? (
         <div className="rounded-3xl border-2 border-neutral-800 bg-neutral-900 p-6 text-center">
-          <p className="text-lg font-black text-neutral-100">The whole crew is yours!</p>
-          <p className="mt-1 text-sm text-neutral-500">More sound monsters are on their way…</p>
+          <p className="text-lg font-black text-neutral-100">
+            {nextEgg(profile) ? 'An egg is wobbling!' : 'The whole crew is yours!'}
+          </p>
+          <p className="mt-1 text-sm text-neutral-500">
+            {nextEgg(profile)
+              ? 'Go and meet it in Monsters — new friends hatch, they are not bought.'
+              : 'More sound monsters are on their way…'}
+          </p>
         </div>
       ) : (
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
           {locked.map((p) => {
-            const afford = profile.coins >= p.price;
+            const afford = unlocked && profile.coins >= p.price;
             return (
               <div key={p.id} className="flex flex-col items-center rounded-3xl border-2 border-neutral-800 bg-neutral-900 p-4">
                 <Character char={p.char} size={72} />
@@ -2196,14 +2579,18 @@ function ShopTab({ profile, updateProfile, setToast }) {
                     afford ? 'bg-amber-400 text-neutral-950 hover:bg-amber-300' : 'border-2 border-neutral-800 text-neutral-600',
                   ].join(' ')}
                 >
-                  <Coins className="h-4 w-4" /> {p.price}
+                  {unlocked ? <><Coins className="h-4 w-4" /> {p.price}</> : <><Lock className="h-4 w-4" /> Locked</>}
                 </button>
               </div>
             );
           })}
         </div>
       )}
-      <p className="mt-4 text-center text-xs text-neutral-600">Earn coins in Play — every right answer pays {COIN_CORRECT} coins.</p>
+      <p className="mt-4 text-center text-xs text-neutral-600" data-shop-unlocked={unlocked ? '1' : '0'}>
+        {unlocked
+          ? `Earn coins in Play — every right answer pays ${COIN_CORRECT} coins.`
+          : `New friends arrive when you know three sounds really well (${fluentCount(profile)}/3).`}
+      </p>
     </div>
   );
 }
@@ -2640,6 +3027,8 @@ export default function SongBruhs() {
   const [showtime, setShowtime] = useState(null);   // loop ids performing right now
   const [clips, setClips] = useState(loadClips);
   const [recording, setRecording] = useState(false);
+  const [familyOpen, setFamilyOpen] = useState(false);
+  const [familyView, setFamilyView] = useState('card');   // card | voices | create
   setClipRegistry(clips);
 
   const profile = save.active ? save.profiles.find((pr) => pr.id === save.active) : null;
@@ -2961,14 +3350,6 @@ export default function SongBruhs() {
           >
             <Cookie className="h-5 w-5" /> {profile.treats || 0}
           </span>
-          <button
-            type="button"
-            onClick={() => setSave((sv) => ({ ...sv, active: null }))}
-            className="flex h-12 w-12 items-center justify-center rounded-2xl border-2 border-neutral-800 bg-neutral-900 text-neutral-300"
-            title={`Switch player (now: ${profile.name})`}
-          >
-            <Users className="h-5 w-5" />
-          </button>
           <span className="hidden sm:block"><Pulse /></span>
           <button
             type="button"
@@ -3031,6 +3412,7 @@ export default function SongBruhs() {
             sfx={sfx}
             onPerform={onPerform}
             onStopPerform={onStopPerform}
+            captions={Boolean(profile.captions)}
           />
         )}
 
@@ -3095,65 +3477,118 @@ export default function SongBruhs() {
           </>
         )}
 
-        {tab === 'create' && recording && (
-          <VoiceRecorder clips={clips} setClips={setClips} onClose={() => setRecording(false)} />
-        )}
+        {tab === 'family' && !familyOpen && <HoldGate onOpen={() => setFamilyOpen(true)} />}
 
-        {tab === 'create' && !recording && (
-          <>
-            <button
-              type="button"
-              onClick={() => setRecording(true)}
-              data-open-recorder="1"
-              className="mb-4 flex min-h-14 w-full items-center justify-center gap-2 rounded-2xl border-2 border-amber-300 bg-neutral-900 text-sm font-black text-amber-300 hover:bg-neutral-800"
-            >
-              <Mic className="h-5 w-5" />
-              Grown-ups: record the sounds in your voice ({Object.keys(clips).length}/{SCRIPT.length})
-            </button>
-            <Creator
-              draft={draft}
-              setDraft={setDraft}
-              roster={roster}
-              running={!masterMuted}
-              onSave={() => saveChar(false)}
-              onSavePlace={() => saveChar(true)}
-            />
-          </>
-        )}
+        {tab === 'family' && familyOpen && (
+          <div data-family="1">
+            <div className="mx-auto mb-4 flex max-w-lg gap-2">
+              {[['card', 'Progress', Medal], ['voices', 'Voices', Mic], ['create', 'Create', Wand2]].map(([k, label, Icon]) => (
+                <button
+                  key={k}
+                  type="button"
+                  onClick={() => { setFamilyView(k); setRecording(false); }}
+                  className={[
+                    'flex min-h-12 flex-1 items-center justify-center gap-2 rounded-2xl border-2 text-sm font-bold',
+                    familyView === k ? 'border-amber-300 bg-neutral-900 text-amber-300' : 'border-neutral-800 text-neutral-400',
+                  ].join(' ')}
+                >
+                  <Icon className="h-4 w-4" /> {label}
+                </button>
+              ))}
+            </div>
 
-        {tab === 'combos' && (
-          <div>
-            <p className="mb-2 flex items-center gap-2 text-xs font-black tracking-widest text-green-400">
-              <BookOpen className="h-4 w-4" /> WORDS YOU MADE ({(profile.words || []).length}/{WORDS.length})
-            </p>
-            <p className="mb-3 text-sm text-neutral-500">
-              Stand your sound monsters next to each other on the Stage and they will blend into a word.
-            </p>
-            <div className="mb-6 grid grid-cols-3 gap-2 sm:grid-cols-6" data-scrapbook={(profile.words || []).length}>
-              {WORDS.map((w) => {
-                const found = (profile.words || []).includes(w.word);
-                return (
+            {familyView === 'card' && (
+              <div className="mx-auto max-w-lg">
+                <ParentCard profile={profile} />
+                <div className="mt-6 border-t-2 border-neutral-800 pt-4">
+                  <p className="mb-2 text-xs font-black tracking-widest text-neutral-500">SHOW THE LETTER</p>
                   <button
-                    key={w.word}
                     type="button"
-                    disabled={!found}
-                    onClick={() => { if (!playClip(`w:${w.word}`)) speak(w.word, { rate: 0.8 }); }}
+                    data-captions={profile.captions ? '1' : '0'}
+                    onClick={() => updateProfile((pr) => ({ ...pr, captions: !pr.captions }))}
                     className={[
-                      'flex min-h-14 items-center justify-center rounded-2xl border-2 text-xl font-black',
-                      found ? 'border-green-400 bg-neutral-900 text-green-300' : 'border-neutral-800 bg-neutral-950 text-neutral-700',
+                      'flex min-h-14 w-full items-center justify-between rounded-2xl border-2 px-4 text-sm font-bold',
+                      profile.captions ? 'border-amber-300 text-amber-300' : 'border-neutral-800 text-neutral-300',
                     ].join(' ')}
                   >
-                    {found ? w.word : '· · ·'}
+                    <span className="text-left">
+                      Show the target letter on screen
+                      <span className="block text-xs font-normal text-neutral-500">
+                        For deaf or hard-of-hearing players. This turns listening into letter-matching.
+                      </span>
+                    </span>
+                    <span className={profile.captions ? 'text-amber-300' : 'text-neutral-600'}>{profile.captions ? 'ON' : 'OFF'}</span>
                   </button>
-                );
-              })}
-            </div>
-            <p className="mb-3 text-sm text-neutral-500">
-              Four secret sound sets. Land all three at once and a bonus layer fades in on the next bar.
-            </p>
-            <CombosPanel discovered={discovered} activeIds={activeIds} />
+                </div>
+
+                <div className="mt-6 border-t-2 border-neutral-800 pt-4">
+                  <p className="mb-2 text-xs font-black tracking-widest text-neutral-500">PLAYERS</p>
+                  <div className="flex flex-wrap gap-2">
+                    {save.profiles.map((pr) => (
+                      <button
+                        key={pr.id}
+                        type="button"
+                        onClick={() => { setSave((sv) => ({ ...sv, active: pr.id })); setTab('play'); setFamilyOpen(false); }}
+                        className={[
+                          'flex min-h-12 items-center gap-2 rounded-2xl border-2 px-4 text-sm font-bold',
+                          pr.id === profile.id ? 'border-amber-300 text-amber-300' : 'border-neutral-800 text-neutral-300',
+                        ].join(' ')}
+                      >
+                        {pr.name}
+                      </button>
+                    ))}
+                    <button
+                      type="button"
+                      onClick={() => setSave((sv) => ({ ...sv, active: null }))}
+                      className="flex min-h-12 items-center gap-2 rounded-2xl border-2 border-neutral-800 px-4 text-sm font-bold text-neutral-300"
+                    >
+                      + Add a player
+                    </button>
+                  </div>
+                </div>
+                <div className="mt-6 border-t-2 border-neutral-800 pt-4">
+                  <p className="mb-2 text-xs font-black tracking-widest text-neutral-500">WORDS BUILT ON THE STAGE</p>
+                  <div className="grid grid-cols-4 gap-2 sm:grid-cols-6" data-scrapbook={(profile.words || []).length}>
+                    {WORDS.map((w) => {
+                      const found = (profile.words || []).includes(w.word);
+                      return (
+                        <span
+                          key={w.word}
+                          className={[
+                            'flex min-h-10 items-center justify-center rounded-xl border-2 text-base font-black',
+                            found ? 'border-green-400 text-green-300' : 'border-neutral-800 text-neutral-700',
+                          ].join(' ')}
+                        >
+                          {found ? w.word : '· · ·'}
+                        </span>
+                      );
+                    })}
+                  </div>
+                </div>
+                <div className="mt-6 border-t-2 border-neutral-800 pt-4">
+                  <p className="mb-2 text-xs font-black tracking-widest text-neutral-500">SOUND COMBOS FOUND</p>
+                  <CombosPanel discovered={discovered} activeIds={activeIds} />
+                </div>
+              </div>
+            )}
+
+            {familyView === 'voices' && (
+              <VoiceRecorder clips={clips} setClips={setClips} onClose={() => setFamilyView('card')} />
+            )}
+
+            {familyView === 'create' && (
+              <Creator
+                draft={draft}
+                setDraft={setDraft}
+                roster={roster}
+                running={!masterMuted}
+                onSave={() => saveChar(false)}
+                onSavePlace={() => saveChar(true)}
+              />
+            )}
           </div>
         )}
+
       </main>
 
       {/* bottom tabs */}
@@ -3163,25 +3598,32 @@ export default function SongBruhs() {
           { k: 'monsters', label: 'Monsters', Icon: Heart },
           { k: 'shop', label: 'Shop', Icon: ShoppingBag },
           { k: 'stage', label: 'Stage', Icon: Music },
-          { k: 'create', label: 'Create', Icon: Wand2 },
-          { k: 'combos', label: 'Combos', Icon: Sparkles },
         ].map(({ k, label, Icon }) => (
           <button
             key={k}
             type="button"
-            onClick={() => setTab(k)}
+            onClick={() => { setTab(k); speak(label); }}
             aria-label={label}
             className={[
-              'flex min-h-12 flex-1 items-center justify-center gap-2 rounded-2xl border-2 text-sm font-black',
+              'flex min-h-14 flex-1 items-center justify-center gap-2 rounded-2xl border-2 text-sm font-black',
               tab === k ? 'border-amber-400 bg-neutral-900 text-amber-300' : 'border-neutral-800 bg-neutral-900 text-neutral-500',
             ].join(' ')}
           >
-            <Icon className="h-5 w-5 shrink-0" /> <span className="hidden lg:inline">{label}</span>
-            {k === 'combos' && discovered.length > 0 && (
-              <span className="hidden rounded-full bg-neutral-800 px-2 text-xs text-neutral-300 lg:inline">{discovered.length}/4</span>
-            )}
+            <Icon className="h-6 w-6 shrink-0" /> <span className="hidden lg:inline">{label}</span>
           </button>
         ))}
+        {/* the family door: small, unlabelled, and gated behind a hold */}
+        <button
+          type="button"
+          onClick={() => { setTab('family'); setFamilyOpen(false); }}
+          aria-label="Grown-ups"
+          className={[
+            'flex min-h-14 w-14 items-center justify-center rounded-2xl border-2',
+            tab === 'family' ? 'border-amber-400 bg-neutral-900 text-amber-300' : 'border-neutral-800 bg-neutral-900 text-neutral-600',
+          ].join(' ')}
+        >
+          <Lock className="h-5 w-5" />
+        </button>
       </nav>
 
       {/* drag ghost */}
@@ -3228,7 +3670,7 @@ export default function SongBruhs() {
 
             {sheet.kind === 'slot' ? (
               <>
-                <div className="mt-4 grid grid-cols-3 gap-2">
+                <div className="mt-4 grid grid-cols-2 gap-2">
                   <button
                     type="button"
                     onClick={() => setSlots((p) => p.map((s, i) => (i === sheet.index ? { ...s, muted: !s.muted } : s)))}
@@ -3238,16 +3680,6 @@ export default function SongBruhs() {
                     ].join(' ')}
                   >
                     <VolumeX className="h-5 w-5" /> {sheetSlot.muted ? 'Unmute' : 'Mute'}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setSlots((p) => p.map((s, i) => (i === sheet.index ? { ...s, solo: !s.solo } : s)))}
-                    className={[
-                      'flex min-h-14 flex-col items-center justify-center gap-1 rounded-2xl border-2 text-xs font-bold',
-                      sheetSlot.solo ? 'border-amber-300 bg-neutral-800 text-amber-300' : 'border-neutral-800 bg-neutral-950 text-neutral-300',
-                    ].join(' ')}
-                  >
-                    <Headphones className="h-5 w-5" /> Solo
                   </button>
                   <button
                     type="button"

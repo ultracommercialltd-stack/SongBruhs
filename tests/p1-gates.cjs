@@ -35,7 +35,6 @@ async function fresh(browser, name, tier) {
   await p.getByRole('button', { name: 'START' }).click();
   await p.waitForSelector("text=Who's playing?");
   await p.fill('input[aria-label="Player name"]', name);
-  await p.getByText(tier === 'B' ? 'Big (5–7)' : 'Little (3–5)').click();
   await p.getByRole('button', { name: /Let's play/ }).click();
   await p.waitForSelector('[data-target]');
   return { ctx, p };
@@ -179,15 +178,15 @@ async function answerRight(p) {
     await p.locator('nav [aria-label="Monsters"]').click();
     await p.waitForTimeout(300);
     const coinsBefore = await coinsOf(p);
-    await p.locator('main').getByRole('button', { name: /^Feed/ }).first().click();
+    await p.locator('main').getByRole('button', { name: /^Feed / }).first().click();
     await p.waitForTimeout(400);
     ok((await treatsOf(p)) === 1, `feeding spent a treat (2 -> ${await treatsOf(p)})`);
     ok((await coinsOf(p)) === coinsBefore, `feeding cost no coins (still ${await coinsOf(p)})`);
     // spend the last one, then the button must lock out
-    await p.locator('main').getByRole('button', { name: /^Feed/ }).first().click();
+    await p.locator('main').getByRole('button', { name: /^Feed / }).first().click();
     await p.waitForTimeout(400);
     ok((await treatsOf(p)) === 0, 'treats can reach zero');
-    const disabled = await p.locator('main').getByRole('button', { name: /^Feed/ }).first().isDisabled();
+    const disabled = await p.locator('main').getByRole('button', { name: /^Feed / }).first().isDisabled();
     ok(disabled, 'with no treats the feed button is disabled, not a dead tap');
     await ctx.close();
   }

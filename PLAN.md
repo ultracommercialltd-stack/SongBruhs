@@ -74,33 +74,43 @@ Rules that govern sequencing:
 - 🧒 PLAYTEST 2 (still to do): give the younger child s,a,t and no instructions.
   Discovery? Says the word aloud? Rearranges to repeat it?
 
-## P4 — The Quiet Teacher · 2 sessions
-- [ ] Mastery per sound: fast correct +1, slow/replayed +0.5, wrong −1 (0..5)
-- [ ] Picker: ~60% wobbly / 20% newest / 20% maintenance
-- [ ] Mistake intelligence: <700ms wrongs don't count; repeated same-distractor →
-      2-card contrast drill until 3 clean; sustained guessing suspends payouts
-- [ ] Mastery gates shop unlocks (3 sounds ≥4 → next monster purchasable); tier B
-      words mix in per-sound automatically; remove A/B toggle from signup
-- Gate: simulated learners (strong / struggling / guesser / s-n-confused) each get
-  the intended mix over 50 questions; contrast drill triggers and resolves.
+## P4 — The Quiet Teacher · 2 sessions — ✅ DONE
+- [x] Mastery per sound: fast correct +1, slow/replayed +0.5, wrong −1 (0..5)
+- [x] Picker: ~60% wobbly / 20% newest / 20% maintenance
+- [x] Mistake intelligence: <700ms wrongs don't count; repeated same-distractor →
+      2-card contrast drill until 3 clean, then the confusion is cleared
+- [x] Mastery gates shop unlocks (3 fluent → next monster purchasable); word
+      questions mix in per-sound automatically; the A/B toggle is gone
+- Gate PASSED: four simulated learners each get the intended treatment; the
+  drill fires on exactly the confused pair and resolves; instant taps teach the
+  model nothing; a beginner never sees a word question and a fluent child
+  always does; 500 coins cannot open the shop. tests/p4-gates.cjs
 
-## P5 — A Kid's House · 2 sessions
-- [ ] Kid nav → 4 tabs (Play, Monsters, Shop, Stage); Combos tab dissolves;
-      Create + recorder + player switch + parent card behind hold-3s family corner
-- [ ] Parent card: knows / improving / practising per sound, minutes, one
-      dinner-table tip (data from P0 logs)
-- [ ] Voice on tab switch; icon-first kid buttons with speech on tap
-- [ ] Caption toggle (tier A shows target grapheme = letter-matching mode, labelled)
-- [ ] Remove Solo from slot popover
-- Gate: zero required reading on any kid surface; card comprehensible in 10s;
-  hold-gate defeats toddler tapping.
+## P5 — A Kid's House · 2 sessions — ✅ DONE
+- [x] Kid nav → 4 tabs (Play, Monsters, Shop, Stage); Combos dissolved; Create,
+      recorder, player switching and the parent card behind a hold-to-open door
+- [x] Parent card: knows / improving / needs practice per sound with real
+      accuracy, words built, and one dinner-table tip generated from the child's
+      actual confusion data
+- [x] Voice on tab switch; icon-first kid controls (speaker, cookie)
+- [x] Caption toggle — shows the target grapheme, labelled honestly as
+      letter-matching, for deaf and hard-of-hearing players
+- [x] Solo removed from the slot sheet
+- Gate PASSED: four kid tabs plus one small door; a tap and a short press both
+  bounce off the hold gate; the card renders real logged data in bands; the
+  caption shows a single grapheme. tests/p5-gates.cjs
 
-## P6 — New Arrivals · 1–2 sessions
-- [ ] GPC sets 2–4 (m d g o c k · ck e u r · h b f l) as eggs that hum their sound
-      and hatch after the child finds it 3× across rounds
-- [ ] CVC word pool grows from mastered sounds only (hand-curated list)
-- [ ] Recorder round 2 prompts new phonemes as sets unlock
-- Gate: simulated month of play never runs dry; every audible word is human-curated.
+## P6 — New Arrivals · 1–2 sessions — ✅ DONE
+- [x] GPC sets 2–4 (m d g o c k · e u r h · b f l) — 13 new monsters that arrive
+      as eggs, hum their sound, and hatch after the child finds it 3× in play.
+      One question in five offers the egg's sound.
+- [x] Sets pace by fluency, not coins: a beginner cannot see or buy set 2
+- [x] Blend words stay a hand-curated list of 22, only from met graphemes
+- [x] The recorder script covers every registered phoneme as sets unlock
+- Gate PASSED: a beginner sees no egg and 500 coins buys nothing; four fluent
+  sounds bring the egg in phase order; three finds hatch it into the roster,
+  stage and questions; a child fluent in twelve sounds still has somewhere to
+  go. tests/p6-gates.cjs
 
 ## Later — The Rhythm Section (maths)
 Enters through the beat, reusing P1–P6 machinery: subitising drummer ("how many

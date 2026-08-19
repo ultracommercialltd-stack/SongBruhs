@@ -31,7 +31,7 @@ const SAVE = {
 };
 
 async function openStage(browser) {
-  const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+  const ctx = await browser.newContext({ viewport: { width: 1280, height: 1000 } });
   const p = await ctx.newPage();
   const errs = [];
   p.on('pageerror', (e) => errs.push(e.message));
@@ -57,6 +57,18 @@ async function place(p, slotIdx, monsterName) {
   }
   await p.locator(`button:has-text("${monsterName}")`).last().click();
   await p.waitForTimeout(350);
+}
+/* Since P5 the grown-up tools live behind a hold-to-open family door. */
+async function openFamily(p, view) {
+  await p.locator('nav [aria-label="Grown-ups"]').click();
+  await p.waitForSelector('[data-hold-gate]');
+  const box = await p.locator('[data-hold-gate]').boundingBox();
+  await p.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await p.mouse.down();
+  await p.waitForTimeout(1800);
+  await p.mouse.up();
+  await p.waitForSelector('[data-family]', { timeout: 4000 });
+  if (view) { await p.getByRole('button', { name: view }).click(); await p.waitForTimeout(300); }
 }
 const blendOf = async (p) => {
   const el = p.locator('[data-blend]');
@@ -117,22 +129,19 @@ const blendOf = async (p) => {
     await place(p, 1, 'Azza');
     await place(p, 2, 'Tikko');
     await p.waitForTimeout(500);
-    await p.locator('nav [aria-label="Combos"]').click();
-    await p.waitForTimeout(300);
+    await openFamily(p);
     const found = Number(await p.locator('[data-scrapbook]').getAttribute('data-scrapbook'));
     ok(found >= 1, `the made word is recorded in the scrapbook (${found})`);
-    const words = await p.locator('[data-scrapbook] button:not([disabled])').allInnerTexts();
-    ok(words.includes('sat'), `"sat" is in the book (${words.join(', ')})`);
-    const hidden = await p.locator('[data-scrapbook] button[disabled]').count();
-    ok(hidden > 0, `undiscovered words stay hidden (${hidden} left to find)`);
+    const words = await p.locator('[data-scrapbook] > *').allInnerTexts();
+    ok(words.includes('sat'), `"sat" is in the book (${words.filter((w) => w !== '· · ·').join(', ')})`);
+    ok(words.filter((w) => w === '· · ·').length > 0, `undiscovered words stay hidden (${words.filter((w) => w === '· · ·').length} left)`);
 
     // survives a reload
     await p.reload({ waitUntil: 'networkidle' });
     await p.getByRole('button', { name: 'START' }).click();
     await p.waitForSelector('[data-target]');
-    await p.locator('nav [aria-label="Combos"]').click();
-    await p.waitForTimeout(300);
-    const after = await p.locator('[data-scrapbook] button:not([disabled])').allInnerTexts();
+    await openFamily(p);
+    const after = await p.locator('[data-scrapbook] > *').allInnerTexts();
     ok(after.includes('sat'), 'the scrapbook survives a reload');
     await ctx.close();
   }
