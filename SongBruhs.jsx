@@ -1060,7 +1060,7 @@ const FEED_XP = 2;
    teachable approximations; swap for recorded clips later. */
 const PHONEMES = [
   { id: 'ph_s', letter: 's', say: 'ssss', name: 'Sizzo', price: 0,
-    words: ['sun', 'sock', 'sand', 'soup'],
+    words: ['sun', 'sock', 'sand', 'seal'],
     char: { id: 'ph_s', name: 'Sizzo', body: 'tall', eyes: 'sleepy', mouth: 'smile', head: 'antenna', acc: 'tail', primary: '#3ec9a7', accent: '#7ae582', detail: '#2b2b33' } },
   { id: 'ph_a', letter: 'a', say: 'a', name: 'Azza', price: 0,
     words: ['ant', 'apple', 'astronaut', 'ambulance'],
@@ -1104,13 +1104,27 @@ function speak(text, opts) {
 }
 
 /* --- on-device save ------------------------------------------------------- */
+const SAVE_VERSION = 2;
+/* v1 -> v2: adds the per-sound stats block. Unknown fields are preserved so a
+   downgrade never destroys data; a corrupt save falls back to a fresh start. */
+function migrateProfile(p) {
+  return {
+    createdChars: [],
+    discovered: [],
+    correct: 0,
+    ...p,
+    stats: p.stats && typeof p.stats === 'object' ? p.stats : {},
+  };
+}
 function loadSave() {
   try {
     const raw = window.localStorage.getItem(SAVE_KEY);
     const s = raw ? JSON.parse(raw) : null;
-    if (s && Array.isArray(s.profiles)) return s;
+    if (s && Array.isArray(s.profiles)) {
+      return { ...s, version: SAVE_VERSION, profiles: s.profiles.map(migrateProfile) };
+    }
   } catch (e) { /* fresh start */ }
-  return { profiles: [], active: null };
+  return { version: SAVE_VERSION, profiles: [], active: null };
 }
 function persistSave(data) {
   try { window.localStorage.setItem(SAVE_KEY, JSON.stringify(data)); } catch (e) { /* full/blocked */ }
@@ -1123,6 +1137,7 @@ function newProfile(name, tier, colour) {
     colour,
     coins: 10,
     mons: { ph_s: { xp: 0 }, ph_a: { xp: 0 } },
+    stats: {},
     createdChars: [],
     discovered: [],
     correct: 0,
@@ -1252,10 +1267,20 @@ function ProfileGate({ save, setSave }) {
 }
 
 /* --- Play tab: the phonics round ------------------------------------------ */
-function makeQuestion(profile, lastTargetId) {
+const LOCKOUT_MS = 1000;   // pause after a wrong tap: interrupts machine-gun guessing
+const FAST_MS = 3000;      // a clean correct under this counts as fluent
+const CELEBRATE_MS = 1500;
+
+function makeQuestion(profile, lastTargetId, forcedId) {
   const owned = PHONEMES.filter((p) => profile.mons[p.id]);
-  const pool = owned.filter((p) => p.id !== lastTargetId);
-  const target = (pool.length ? pool : owned)[Math.floor(Math.random() * (pool.length ? pool.length : owned.length))];
+  let target;
+  if (forcedId && PHONEME_BY_ID[forcedId] && profile.mons[forcedId]) {
+    target = PHONEME_BY_ID[forcedId];
+  } else {
+    const pool = owned.filter((p) => p.id !== lastTargetId);
+    const src = pool.length ? pool : owned;
+    target = src[Math.floor(Math.random() * src.length)];
+  }
   const others = shuffleArr(PHONEMES.filter((p) => p.id !== target.id)).slice(0, 2);
   return {
     target,
@@ -1269,51 +1294,138 @@ function promptFor(q, tier) {
     : `Find the monster that says ... ${q.target.say}`;
 }
 
+/* Per-sound flight recorder: one aggregate row per grapheme-phoneme pair.
+   asked counts completed questions; confusions counts every wrong tap by
+   which distractor was chosen. Feeds the P4 adaptive engine and P5 parent card. */
+const emptyStat = () => ({ asked: 0, right: 0, fastRight: 0, wrong: 0, totalMs: 0, confusions: {} });
+const statOf = (pr, id) => pr.stats[id] || emptyStat();
+
 function LearnTab({ profile, updateProfile, setToast }) {
-  const [q, setQ] = useState(() => makeQuestion(profile, null));
-  const [phase, setPhase] = useState('ask'); // ask | correct
+  const flagRef = useRef([]);            // missed sounds queued to return: {id, countdown}
+  const [q, setQ] = useState(() => makeQuestion(profile, null, null));
+  const [phase, setPhase] = useState('ask');   // ask | model | correct
+  const [wrongCount, setWrongCount] = useState(0);
   const [wrongId, setWrongId] = useState(null);
+  const [locked, setLocked] = useState(false);
   const [streak, setStreak] = useState(0);
+  const askedAtRef = useRef(0);
+  const firstTapMsRef = useRef(null);
   const timer = useRef(null);
 
   useEffect(() => () => clearTimeout(timer.current), []);
-  useEffect(() => { speak(promptFor(q, profile.tier)); }, [q]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    askedAtRef.current = performance.now();
+    speak(promptFor(q, profile.tier));
+  }, [q]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const next = useCallback(() => {
-    setQ((old) => makeQuestion(profile, old.target.id));
+    flagRef.current.forEach((f) => { f.countdown -= 1; });
+    const due = flagRef.current.find((f) => f.countdown <= 0);
+    if (due) flagRef.current = flagRef.current.filter((f) => f !== due);
+    setQ((old) => makeQuestion(profile, old.target.id, due ? due.id : null));
     setPhase('ask');
+    setWrongCount(0);
     setWrongId(null);
+    setLocked(false);
+    firstTapMsRef.current = null;
   }, [profile]);
 
-  const answer = (p) => {
-    if (phase !== 'ask') return;
-    if (p.id === q.target.id) {
-      setPhase('correct');
-      const newStreak = streak + 1;
-      setStreak(newStreak);
-      const bonus = newStreak % STREAK_EVERY === 0 ? STREAK_BONUS : 0;
-      const prevXp = profile.mons[p.id].xp;
-      const grew = metalOf(prevXp + 1).key !== metalOf(prevXp).key;
-      updateProfile((pr) => ({
+  const finishCorrect = (p, clean) => {
+    setPhase('correct');
+    const ms = firstTapMsRef.current == null ? FAST_MS : firstTapMsRef.current;
+    const coins = clean ? COIN_CORRECT : 1;
+    const newStreak = clean ? streak + 1 : 0;
+    setStreak(newStreak);
+    const bonus = clean && newStreak > 0 && newStreak % STREAK_EVERY === 0 ? STREAK_BONUS : 0;
+    const prevXp = profile.mons[p.id].xp;
+    const grew = metalOf(prevXp + 1).key !== metalOf(prevXp).key;
+    updateProfile((pr) => {
+      const s = statOf(pr, p.id);
+      return {
         ...pr,
-        coins: pr.coins + COIN_CORRECT + bonus,
+        coins: pr.coins + coins + bonus,
         correct: pr.correct + 1,
         mons: { ...pr.mons, [p.id]: { xp: pr.mons[p.id].xp + 1 } },
-      }));
-      const praise = PRAISE[Math.floor(Math.random() * PRAISE.length)];
-      speak(grew
-        ? `${praise} ${p.name} is now ${metalOf(prevXp + 1).label}!`
-        : bonus ? `${praise} ${newStreak} in a row!` : `${praise} ${p.say}!`);
-      if (grew) setToast(`${p.name} reached ${metalOf(prevXp + 1).label}!`);
-      else if (bonus) setToast(`Streak! +${STREAK_BONUS} bonus coins`);
-      timer.current = setTimeout(next, 1500);
+        stats: {
+          ...pr.stats,
+          [p.id]: {
+            ...s,
+            asked: s.asked + 1,
+            right: s.right + 1,
+            fastRight: s.fastRight + (clean && ms < FAST_MS ? 1 : 0),
+            totalMs: s.totalMs + Math.round(ms),
+          },
+        },
+      };
+    });
+    const praise = PRAISE[Math.floor(Math.random() * PRAISE.length)];
+    if (profile.tier === 'B') speak(`${praise} ${q.word} starts with ${p.say}!`);
+    else speak(grew ? `${praise} ${p.name} is now ${metalOf(prevXp + 1).label}!` : bonus ? `${praise} ${newStreak} in a row!` : `${praise} ${p.say}!`);
+    if (grew) setToast(`${p.name} reached ${metalOf(prevXp + 1).label}!`);
+    else if (bonus) setToast(`Streak! +${STREAK_BONUS} bonus coins`);
+    timer.current = setTimeout(next, CELEBRATE_MS);
+  };
+
+  const answer = (p) => {
+    if (locked || phase === 'correct') return;
+
+    if (phase === 'model') {
+      if (p.id !== q.target.id) return;
+      // modelled completion: the child still performs the correct action,
+      // but a fully assisted question pays nothing and counts as a miss
+      setPhase('correct');
+      updateProfile((pr) => {
+        const s = statOf(pr, q.target.id);
+        return { ...pr, stats: { ...pr.stats, [q.target.id]: { ...s, asked: s.asked + 1, wrong: s.wrong + 1 } } };
+      });
+      speak(`That's it! ${q.target.say}! ${q.target.say}!`);
+      timer.current = setTimeout(next, CELEBRATE_MS);
+      return;
+    }
+
+    if (firstTapMsRef.current == null) firstTapMsRef.current = performance.now() - askedAtRef.current;
+
+    if (p.id === q.target.id) {
+      finishCorrect(p, wrongCount === 0);
+      return;
+    }
+
+    // wrong tap
+    const wc = wrongCount + 1;
+    setWrongCount(wc);
+    setStreak(0);
+    setWrongId(p.id);
+    setLocked(true);
+    updateProfile((pr) => {
+      const s = statOf(pr, q.target.id);
+      return {
+        ...pr,
+        stats: {
+          ...pr.stats,
+          [q.target.id]: { ...s, confusions: { ...s.confusions, [p.id]: (s.confusions[p.id] || 0) + 1 } },
+        },
+      };
+    });
+    if (wc >= 2) {
+      // second wrong: model the answer, flag the sound to return soon
+      flagRef.current.push({ id: q.target.id, countdown: 2 });
+      speak(`Listen! This one says ${q.target.say}. Tap ${q.target.name}!`);
+      timer.current = setTimeout(() => {
+        setWrongId(null);
+        setLocked(false);
+        setPhase('model');
+      }, LOCKOUT_MS);
     } else {
-      setWrongId(p.id);
-      setStreak(0);
-      speak(`That one says ${p.say}. Try again!`);
-      timer.current = setTimeout(() => setWrongId(null), 400);
+      speak(`That one says ${p.say}.`);
+      timer.current = setTimeout(() => {
+        setWrongId(null);
+        setLocked(false);
+        speak(promptFor(q, profile.tier));
+      }, LOCKOUT_MS);
     }
   };
+
+  const revealWord = phase === 'correct' && profile.tier === 'B' && q.word;
 
   return (
     <div className="mx-auto max-w-lg">
@@ -1330,33 +1442,44 @@ function LearnTab({ profile, updateProfile, setToast }) {
         </span>
       </div>
 
-      <div className="mt-3 rounded-3xl border-2 border-neutral-800 bg-neutral-900 p-4 text-center">
-        {profile.tier === 'B' ? (
-          <p className="text-lg font-black text-neutral-100">
-            Which sound does <span className="text-amber-300">{q.word}</span> start with?
+      <div className="mt-3 min-h-20 rounded-3xl border-2 border-neutral-800 bg-neutral-900 p-4 text-center">
+        {revealWord ? (
+          <p className="text-2xl font-black text-neutral-100" data-reveal={q.word}>
+            <span className="text-amber-300">{q.word[0]}</span>{q.word.slice(1)}
           </p>
+        ) : phase === 'model' ? (
+          <p className="text-lg font-black text-amber-300">Tap the monster that sings the sound!</p>
+        ) : profile.tier === 'B' ? (
+          <p className="text-lg font-black text-neutral-100">Listen! What sound does the word start with?</p>
         ) : (
           <p className="text-lg font-black text-neutral-100">Find the monster that says the sound!</p>
         )}
-        <p className="mt-1 text-xs text-neutral-500">Tap the speaker to hear it as many times as you like</p>
+        {phase === 'ask' && (
+          <p className="mt-1 text-xs text-neutral-500">Tap “Hear it again” as many times as you like</p>
+        )}
       </div>
 
-      <div className="mt-3 grid grid-cols-3 gap-2">
+      <div className="mt-3 grid grid-cols-3 gap-2" data-target={q.target.id} data-phase={phase}>
         {q.choices.map((p) => {
-          const correct = phase === 'correct' && p.id === q.target.id;
+          const isTarget = p.id === q.target.id;
+          const celebrate = phase !== 'ask' && isTarget;
+          const dimmed = phase === 'model' && !isTarget;
           return (
             <button
               key={p.id}
               type="button"
+              data-choice={p.id}
+              disabled={dimmed}
               onClick={() => answer(p)}
               className={[
                 'flex min-h-14 flex-col items-center rounded-3xl border-2 bg-neutral-900 p-2 pt-3',
-                correct ? 'border-amber-300 bg-neutral-800' : 'border-neutral-800 hover:border-neutral-600',
+                celebrate ? 'border-amber-300 bg-neutral-800' : 'border-neutral-800 hover:border-neutral-600',
+                dimmed ? 'opacity-30' : '',
                 wrongId === p.id ? 'sb-shake border-red-500' : '',
               ].join(' ')}
             >
-              <div className={correct ? 'sb-anim' : ''} style={correct ? { animation: `sb-bob ${BOB_SEC}s ease-in-out infinite` } : undefined}>
-                <Character char={p.char} size={64} singing={correct} />
+              <div className={celebrate ? 'sb-anim' : ''} style={celebrate ? { animation: `sb-bob ${BOB_SEC}s ease-in-out infinite` } : undefined}>
+                <Character char={p.char} size={64} singing={celebrate} />
               </div>
               <span className="mt-1 text-4xl font-black text-neutral-100">{p.letter}</span>
             </button>
@@ -2251,7 +2374,7 @@ export default function SongBruhs() {
 
       <main className="relative mt-2 px-3 sm:px-5">
         {tab === 'play' && (
-          <LearnTab profile={profile} updateProfile={updateProfile} setToast={setToast} />
+          <LearnTab key={profile.id} profile={profile} updateProfile={updateProfile} setToast={setToast} />
         )}
 
         {tab === 'monsters' && (

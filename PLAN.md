@@ -14,15 +14,17 @@ Rules that govern sequencing:
    regression tests.
 4. Two kid playtests (after P1 and P3) can re-order everything after P3.
 
-## P0 — Fair Play (integrity patch) · 1 session
-- [ ] Tier B: hide the word during the question; show + speak it as a reveal after answering
-- [ ] Wrong answers: 1st wrong halves coin value + replays target; 2nd wrong ends
+## P0 — Fair Play (integrity patch) · 1 session — ✅ DONE
+- [x] Tier B: hide the word during the question; show + speak it as a reveal after answering
+- [x] Wrong answers: 1st wrong halves coin value + replays target; 2nd wrong ends
       question with modelled completion (correct monster sings, child taps it, 0 coins)
-- [ ] ~1s input lockout after each wrong tap
-- [ ] Flagged (missed) sounds re-enter within the next 3 questions
-- [ ] Save v2 + migration: per-sound log {asked, right, wrong, msToAnswer, distractorId}
-- [ ] Copy: fix "tap the speaker" hint; audit word lists (no sneaky vowels in decode pools)
-- Gate: no-ears bot ≤40%; guess-bot earns 0 coins over 20 Qs; v1 saves migrate; harness green.
+- [x] ~1s input lockout after each wrong tap
+- [x] Flagged (missed) sounds re-enter within the next 3 questions (countdown 2)
+- [x] Save v2 + migration: per-sound stats {asked, right, fastRight, wrong, totalMs, confusions}
+- [x] Copy: fixed "tap the speaker" hint; word list de-sneakied (soup -> seal)
+- Gate PASSED: no-ears bot at chance (0 word leaks); guess-bot earned 0 coins;
+  lockout blocks taps; flag re-entry verified; v1 saves migrate losslessly.
+  Permanent tests: tests/p0-gates.cjs (npm run test:gates).
 
 ## P1 — Visible Growth · 2 sessions
 - [ ] Rounds of 5 with progress trail (replaces streak star); round end = owned
