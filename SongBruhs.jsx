@@ -4,6 +4,7 @@ import {
   Play, Volume2, VolumeX, Shuffle, Trash2, X, Check, Sparkles,
   Music, Wand2, Headphones, Users, Ban,
   Coins, Cookie, Medal, Lock, RotateCcw, Star, Ear, Heart, ShoppingBag,
+  Mic, Square,
 } from 'lucide-react';
 
 /* ==========================================================================
@@ -1228,6 +1229,237 @@ function newProfile(name, tier, colour) {
 }
 
 /* ==========================================================================
+   REAL VOICES — parent-recorded phoneme clips.
+
+   Browser TTS cannot produce a clean /t/ or /p/; it says "tuh", "puh", which
+   is the schwa error synthetic phonics works to prevent and which makes
+   blending impossible. Recorded clips replace TTS for the sounds themselves;
+   TTS still handles sentences and praise. Every playback path falls back
+   gracefully, so the game works at any stage of recording completeness.
+   ========================================================================== */
+const CLIP_KEY = 'songbruhs_clips_v1';
+const MAX_CLIP_MS = 2500;
+
+/* What the parent is asked to record, in order. `kind` decides where it is
+   used: 'sound' replaces the phoneme in every prompt; 'word' is the tier-B
+   target; 'praise' is the round finale. */
+function recordingScript() {
+  const items = [];
+  PHONEMES.forEach((p) => {
+    items.push({ id: `s:${p.id}`, kind: 'sound', label: `The sound ${p.letter} makes`,
+      hint: `Say the pure sound — a short hiss or hum, no “uh” on the end.`, letter: p.letter });
+  });
+  PHONEMES.forEach((p) => {
+    p.words.forEach((w) => items.push({ id: `w:${w}`, kind: 'word', label: w, hint: 'Say the word normally.', letter: w[0] }));
+  });
+  items.push({ id: 'praise:show', kind: 'praise', label: 'What a show!', hint: 'Big and proud.', letter: '★' });
+  items.push({ id: 'praise:yes', kind: 'praise', label: 'You got it!', hint: 'Warm and quick.', letter: '★' });
+  return items;
+}
+const SCRIPT = recordingScript();
+const SOUND_CLIPS = SCRIPT.filter((i) => i.kind === 'sound');
+
+/* Clips live in their own storage key so a huge audio blob can never corrupt
+   or bloat the game save. */
+function loadClips() {
+  try {
+    const raw = window.localStorage.getItem(CLIP_KEY);
+    const c = raw ? JSON.parse(raw) : null;
+    if (c && typeof c === 'object') return c;
+  } catch (e) { /* start empty */ }
+  return {};
+}
+function persistClips(clips) {
+  try { window.localStorage.setItem(CLIP_KEY, JSON.stringify(clips)); return true; } catch (e) { return false; }
+}
+
+/* One shared audio element pool: playing a clip must never queue behind TTS. */
+let clipRegistry = {};
+let clipAudio = null;
+function setClipRegistry(c) { clipRegistry = c || {}; }
+function hasClip(id) { return Boolean(clipRegistry[id]); }
+function playClip(id) {
+  const src = clipRegistry[id];
+  if (!src) return false;
+  try {
+    if (!clipAudio) clipAudio = new Audio();
+    clipAudio.pause();
+    clipAudio.src = src;
+    clipAudio.currentTime = 0;
+    const pr = clipAudio.play();
+    if (pr && pr.catch) pr.catch(() => { /* autoplay guard */ });
+    if (window.__sbClipLog) window.__sbClipLog.push(id);
+    return true;
+  } catch (e) { return false; }
+}
+
+/* Say a phoneme: recorded clip first, TTS approximation second. */
+function sayPhoneme(ph) {
+  if (playClip(`s:${ph.id}`)) return 'clip';
+  speak(ph.say);
+  return 'tts';
+}
+/* Say a whole prompt. Where a recorded clip exists for the sound or word, the
+   spoken carrier sentence is shortened and the clip carries the phoneme. */
+function sayPrompt(q, tier) {
+  if (tier === 'B') {
+    if (hasClip(`w:${q.word}`)) {
+      speak('Which sound does this word start with?');
+      window.setTimeout(() => playClip(`w:${q.word}`), 1400);
+      return 'clip';
+    }
+    speak(`Which sound does ${q.word} start with? ... ${q.word}`);
+    return 'tts';
+  }
+  if (hasClip(`s:${q.target.id}`)) {
+    speak('Find the monster that says');
+    window.setTimeout(() => playClip(`s:${q.target.id}`), 1100);
+    return 'clip';
+  }
+  speak(`Find the monster that says ... ${q.target.say}`);
+  return 'tts';
+}
+
+/* --- the recorder ---------------------------------------------------------- */
+function VoiceRecorder({ clips, setClips, onClose }) {
+  const [idx, setIdx] = useState(() => {
+    const first = SCRIPT.findIndex((i) => !clips[i.id]);
+    return first === -1 ? 0 : first;
+  });
+  const [state, setState] = useState('idle');   // idle | recording | saved | denied
+  const [err, setErr] = useState(null);
+  const recRef = useRef(null);
+  const streamRef = useRef(null);
+  const stopTimer = useRef(null);
+
+  const item = SCRIPT[idx];
+  const doneCount = SCRIPT.filter((i) => clips[i.id]).length;
+  const soundsDone = SOUND_CLIPS.filter((i) => clips[i.id]).length;
+
+  const cleanup = useCallback(() => {
+    clearTimeout(stopTimer.current);
+    if (recRef.current && recRef.current.state === 'recording') { try { recRef.current.stop(); } catch (e) { /* noop */ } }
+    if (streamRef.current) { streamRef.current.getTracks().forEach((t) => t.stop()); streamRef.current = null; }
+  }, []);
+  useEffect(() => cleanup, [cleanup]);
+
+  const record = async () => {
+    setErr(null);
+    if (!navigator.mediaDevices || typeof window.MediaRecorder === 'undefined') {
+      setState('denied');
+      setErr('This browser will not let the page record. Try Chrome or Safari, or skip — the game still works.');
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      streamRef.current = stream;
+      const rec = new window.MediaRecorder(stream);
+      recRef.current = rec;
+      const chunks = [];
+      rec.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
+      rec.onstop = () => {
+        const blob = new Blob(chunks, { type: rec.mimeType || 'audio/webm' });
+        const reader = new FileReader();
+        reader.onloadend = () => {
+          const next = { ...clips, [item.id]: String(reader.result) };
+          if (!persistClips(next)) {
+            setErr('No room to save that clip. Delete some and try again.');
+            setState('idle');
+            return;
+          }
+          setClips(next);
+          setState('saved');
+        };
+        reader.readAsDataURL(blob);
+        if (streamRef.current) { streamRef.current.getTracks().forEach((t) => t.stop()); streamRef.current = null; }
+      };
+      rec.start();
+      setState('recording');
+      stopTimer.current = setTimeout(() => { if (rec.state === 'recording') rec.stop(); }, MAX_CLIP_MS);
+    } catch (e) {
+      setState('denied');
+      setErr('Microphone blocked. Allow the mic in your browser, or skip — the game still works.');
+    }
+  };
+  const stopNow = () => { clearTimeout(stopTimer.current); if (recRef.current && recRef.current.state === 'recording') recRef.current.stop(); };
+  const go = (d) => { setState('idle'); setIdx((i) => Math.min(SCRIPT.length - 1, Math.max(0, i + d))); };
+
+  return (
+    <div className="mx-auto max-w-lg" data-recorder="1">
+      <div className="flex items-center gap-2">
+        <button type="button" onClick={onClose} className="flex min-h-12 items-center gap-2 rounded-2xl border-2 border-neutral-700 px-4 text-sm font-bold text-neutral-300">
+          <X className="h-4 w-4" /> Done
+        </button>
+        <span className="ml-auto text-sm font-bold text-neutral-400" data-clips-done={doneCount}>
+          {doneCount}/{SCRIPT.length} recorded
+        </span>
+      </div>
+
+      <div className="mt-3 rounded-3xl border-2 border-neutral-800 bg-neutral-900 p-5 text-center">
+        <p className="text-xs font-black tracking-widest text-amber-300">
+          {item.kind === 'sound' ? 'PURE SOUND' : item.kind === 'word' ? 'WORD' : 'PRAISE'}
+        </p>
+        <p className="mt-2 text-5xl font-black text-neutral-50">{item.label}</p>
+        <p className="mt-2 text-sm text-neutral-400">{item.hint}</p>
+        {item.kind === 'sound' && (
+          <p className="mt-1 text-xs text-neutral-500">
+            Say “{item.letter}” as in a whisper — not “{item.letter}uh”.
+          </p>
+        )}
+
+        <div className="mt-5 flex items-center justify-center gap-3">
+          {state === 'recording' ? (
+            <button
+              type="button"
+              onClick={stopNow}
+              className="flex min-h-16 w-40 items-center justify-center gap-2 rounded-full bg-red-500 text-base font-black text-neutral-950"
+            >
+              <Square className="h-5 w-5" fill="currentColor" /> Stop
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={record}
+              className="flex min-h-16 w-40 items-center justify-center gap-2 rounded-full bg-amber-400 text-base font-black text-neutral-950 hover:bg-amber-300"
+            >
+              <Mic className="h-5 w-5" /> {clips[item.id] ? 'Re-record' : 'Record'}
+            </button>
+          )}
+          {clips[item.id] && (
+            <button
+              type="button"
+              onClick={() => playClip(item.id)}
+              aria-label="Play back"
+              className="flex h-16 w-16 items-center justify-center rounded-full border-2 border-neutral-700 text-neutral-200"
+            >
+              <Volume2 className="h-6 w-6" />
+            </button>
+          )}
+        </div>
+        {state === 'saved' && <p className="mt-3 text-sm font-bold text-green-400">Saved!</p>}
+        {err && <p className="mt-3 text-sm font-bold text-red-400">{err}</p>}
+      </div>
+
+      <div className="mt-3 grid grid-cols-2 gap-2">
+        <button type="button" onClick={() => go(-1)} disabled={idx === 0}
+          className="min-h-12 rounded-2xl border-2 border-neutral-800 text-sm font-bold text-neutral-300 disabled:opacity-30">
+          Back
+        </button>
+        <button type="button" onClick={() => go(1)} disabled={idx >= SCRIPT.length - 1}
+          className="min-h-12 rounded-2xl bg-neutral-200 text-sm font-black text-neutral-900 disabled:opacity-30">
+          Next
+        </button>
+      </div>
+
+      <p className="mt-4 text-center text-xs text-neutral-500">
+        The six pure sounds matter most — {soundsDone}/{SOUND_CLIPS.length} done.
+        Everything else falls back to the computer voice.
+      </p>
+    </div>
+  );
+}
+
+/* ==========================================================================
    GAME UI PIECES
    ========================================================================== */
 function CoinPill({ coins }) {
@@ -1447,7 +1679,7 @@ function LearnTab({ profile, updateProfile, setToast, sfx, onPerform, onStopPerf
   useEffect(() => {
     if (phaseState !== 'ask') return;
     askedAtRef.current = performance.now();
-    speak(promptFor(q, profile.tier));
+    sayPrompt(q, profile.tier);
   }, [q, phaseState]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const startRound = useCallback(() => {
@@ -1471,7 +1703,7 @@ function LearnTab({ profile, updateProfile, setToast, sfx, onPerform, onStopPerf
       const band = PHONEMES.filter((p) => profile.mons[p.id]).map((p) => p.tempLoop).filter(Boolean);
       updateProfile((pr) => ({ ...pr, treats: (pr.treats || 0) + 1 }));
       onPerform(band);
-      speak('What a show! Your band sounds amazing!');
+      if (!playClip('praise:show')) speak('What a show! Your band sounds amazing!');
       setPhaseState('finale');
       return;
     }
@@ -1534,7 +1766,8 @@ function LearnTab({ profile, updateProfile, setToast, sfx, onPerform, onStopPerf
         const s = statOf(pr, q.target.id);
         return { ...pr, stats: { ...pr.stats, [q.target.id]: { ...s, asked: s.asked + 1, wrong: s.wrong + 1 } } };
       });
-      speak(`That's it! ${q.target.say}! ${q.target.say}!`);
+      speak("That's it!");
+      window.setTimeout(() => sayPhoneme(q.target), 800);
       timer.current = setTimeout(advance, CELEBRATE_MS);
       return;
     }
@@ -1562,19 +1795,21 @@ function LearnTab({ profile, updateProfile, setToast, sfx, onPerform, onStopPerf
     });
     if (wc >= 2) {
       flagRef.current.push({ id: q.target.id, countdown: 2 });
-      speak(`Listen! This one says ${q.target.say}. Tap ${q.target.name}!`);
+      speak(`Listen! Tap ${q.target.name}, who says`);
+      window.setTimeout(() => sayPhoneme(q.target), 1200);
       timer.current = setTimeout(() => {
         setWrongId(null);
         setLocked(false);
         setPhaseState('model');
       }, LOCKOUT_MS);
     } else {
-      speak(`That one says ${p.say}.`);
+      speak('That one says');
+      window.setTimeout(() => sayPhoneme(p), 700);
       timer.current = setTimeout(() => {
         setWrongId(null);
         setLocked(false);
-        speak(promptFor(q, profile.tier));
-      }, LOCKOUT_MS);
+        sayPrompt(q, profile.tier);
+      }, LOCKOUT_MS + 500);
     }
   };
 
@@ -1589,7 +1824,7 @@ function LearnTab({ profile, updateProfile, setToast, sfx, onPerform, onStopPerf
       <div className="flex items-center justify-between gap-3">
         <button
           type="button"
-          onClick={() => speak(promptFor(q, profile.tier))}
+          onClick={() => sayPrompt(q, profile.tier)}
           aria-label="Hear it again"
           className="flex min-h-12 items-center gap-2 rounded-2xl border-2 border-neutral-700 bg-neutral-900 px-4 text-sm font-black text-neutral-100 hover:border-amber-300"
         >
@@ -1725,7 +1960,7 @@ function MonstersTab({ profile, updateProfile, setToast, onGoShop, sfx }) {
             <div className="mt-2 grid grid-cols-2 gap-2">
               <button
                 type="button"
-                onClick={() => speak(`${p.name} says ... ${p.say}!`)}
+                onClick={() => sayPhoneme(p)}
                 className="flex min-h-12 items-center justify-center gap-1 rounded-2xl border-2 border-neutral-700 text-xs font-black text-neutral-200 hover:border-neutral-500"
               >
                 <Volume2 className="h-4 w-4" /> Hear
@@ -1755,7 +1990,8 @@ function ShopTab({ profile, updateProfile, setToast }) {
       coins: pr.coins - p.price,
       mons: { ...pr.mons, [p.id]: { xp: 0 } },
     }));
-    speak(`Welcome ${p.name}! ${p.name} says ${p.say}!`, { pitch: 1.2 });
+    speak(`Welcome ${p.name}!`, { pitch: 1.2 });
+    window.setTimeout(() => sayPhoneme(p), 900);
     setToast(`${p.name} joined your band!`);
   };
   const locked = PHONEMES.filter((p) => !profile.mons[p.id]);
@@ -1779,7 +2015,7 @@ function ShopTab({ profile, updateProfile, setToast }) {
                 </p>
                 <button
                   type="button"
-                  onClick={() => speak(`${p.name} says ... ${p.say}!`)}
+                  onClick={() => sayPhoneme(p)}
                   className="mt-1 flex items-center gap-1 text-xs font-bold text-neutral-400 hover:text-neutral-200"
                 >
                   <Volume2 className="h-4 w-4" /> hear my sound
@@ -2235,6 +2471,9 @@ export default function SongBruhs() {
   const [dragging, setDragging] = useState(null);
   const [toast, setToast] = useState(null);
   const [showtime, setShowtime] = useState(null);   // loop ids performing right now
+  const [clips, setClips] = useState(loadClips);
+  const [recording, setRecording] = useState(false);
+  setClipRegistry(clips);
 
   const profile = save.active ? save.profiles.find((pr) => pr.id === save.active) : null;
   useEffect(() => { persistSave(save); }, [save]);
@@ -2639,15 +2878,30 @@ export default function SongBruhs() {
           </>
         )}
 
-        {tab === 'create' && (
-          <Creator
-            draft={draft}
-            setDraft={setDraft}
-            roster={roster}
-            running={!masterMuted}
-            onSave={() => saveChar(false)}
-            onSavePlace={() => saveChar(true)}
-          />
+        {tab === 'create' && recording && (
+          <VoiceRecorder clips={clips} setClips={setClips} onClose={() => setRecording(false)} />
+        )}
+
+        {tab === 'create' && !recording && (
+          <>
+            <button
+              type="button"
+              onClick={() => setRecording(true)}
+              data-open-recorder="1"
+              className="mb-4 flex min-h-14 w-full items-center justify-center gap-2 rounded-2xl border-2 border-amber-300 bg-neutral-900 text-sm font-black text-amber-300 hover:bg-neutral-800"
+            >
+              <Mic className="h-5 w-5" />
+              Grown-ups: record the sounds in your voice ({Object.keys(clips).length}/{SCRIPT.length})
+            </button>
+            <Creator
+              draft={draft}
+              setDraft={setDraft}
+              roster={roster}
+              running={!masterMuted}
+              onSave={() => saveChar(false)}
+              onSavePlace={() => saveChar(true)}
+            />
+          </>
         )}
 
         {tab === 'combos' && (

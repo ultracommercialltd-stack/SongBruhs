@@ -19,6 +19,9 @@ const { chromium } = require('playwright');
 
 const URL = process.env.URL || 'http://localhost:4173/';
 const EXE = process.env.CHROMIUM_PATH || undefined;
+/* the wrong-answer lockout runs long enough for the modelled sound to finish
+   (P2 plays a recorded phoneme after the spoken lead-in) */
+const LOCKOUT_WAIT = 1800;
 const bad = [];
 const ok = (c, m) => { console.log((c ? '  ok   ' : '  FAIL ') + m); if (!c) bad.push(m); };
 
@@ -71,7 +74,7 @@ async function finishQuestion(p) {
   const target = await targetOf(p);
   let phase = await phaseOf(p);
   if (phase === 'ask') {
-    await p.waitForTimeout(1100); // clear any lockout
+    await p.waitForTimeout(LOCKOUT_WAIT); // clear any lockout
     await p.locator(`[data-choice="${target}"]`).click();
     phase = await phaseOf(p);
   }
@@ -127,7 +130,7 @@ async function finishQuestion(p) {
         (els, t) => els.map((e) => e.getAttribute('data-choice')).filter((id) => id !== t), target,
       );
       await p.locator(`[data-choice="${wrong[0]}"]`).click();
-      await p.waitForTimeout(1100);
+      await p.waitForTimeout(LOCKOUT_WAIT);
       await p.locator(`[data-choice="${wrong[1]}"]`).click();
       await waitPhase(p, 'model');
       await p.locator(`[data-choice="${target}"]`).click();
@@ -153,7 +156,7 @@ async function finishQuestion(p) {
     await p.locator(`[data-choice="${target}"]`).click(); // inside lockout
     await p.waitForTimeout(300);
     ok((await phaseOf(p)) !== 'correct', 'tap during lockout does not register');
-    await p.waitForTimeout(900);
+    await p.waitForTimeout(LOCKOUT_WAIT);
     await p.locator(`[data-choice="${target}"]`).click();
     await waitPhase(p, 'correct');
     ok((await coinsOf(p)) - before === 1, `one-wrong correct pays half (+${(await coinsOf(p)) - before})`);
@@ -168,7 +171,7 @@ async function finishQuestion(p) {
       (els, t) => els.map((e) => e.getAttribute('data-choice')).filter((id) => id !== t), target,
     );
     await p.locator(`[data-choice="${wrong2[0]}"]`).click();
-    await p.waitForTimeout(1100);
+    await p.waitForTimeout(LOCKOUT_WAIT);
     await p.locator(`[data-choice="${wrong2[1]}"]`).click();
     await waitPhase(p, 'model');
     await p.locator(`[data-choice="${target}"]`).click();

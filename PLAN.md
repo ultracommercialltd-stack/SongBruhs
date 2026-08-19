@@ -43,12 +43,19 @@ Rules that govern sequencing:
 - 🧒 PLAYTEST 1 (still to do with the kids): do they want the round to finish?
   notice evolutions? replay after the bow?
 
-## P2 — Real Voices · 1 session
-- [ ] Family-corner recorder flow (MediaRecorder → Opus → base64 in save): 6 phonemes
-      ×2 takes + target words + praise lines, in the parent's voice
-- [ ] Clip registry: recorded clip → improved TTS → skip, everywhere phonemes are spoken
-- [ ] Verify on the actual family tablet (iOS MediaRecorder risk; fallback = bundled clip set)
-- Gate: /t/ and /p/ play with no schwa; recording flow <10 min; save with clips survives reload.
+## P2 — Real Voices · 1 session — ✅ DONE
+- [x] Recorder flow (MediaRecorder → base64): 6 pure sounds, 24 target words,
+      2 praise lines, in the parent's voice. Reached from Create for now; moves
+      behind the family corner in P5.
+- [x] Clip registry: recorded clip → TTS approximation → skip, everywhere a
+      phoneme is spoken (prompts, replays, wrong-answer modelling, shop preview,
+      round praise). Clips live in their own storage key, never in the save.
+- [ ] Verify on the actual family tablet (iOS MediaRecorder risk; fallback =
+      bundled clip set) — needs the real device
+- Gate PASSED: with clips present zero schwa strings are spoken; carrier
+  sentences still use TTS; a full round completes with no clips at all; a
+  partial set mixes cleanly; clips survive reload and never enter the game
+  save; a blocked mic explains itself. tests/p2-gates.cjs
 
 ## P3 — The Fusion · 2–3 sessions  ← the audit's #1 fix
 - [ ] Chant-voices: buildChant() loop (Tone.Player + gate, quantised "1m") per phoneme
