@@ -180,7 +180,15 @@ async function play(p, n, strategy, opts) {
     // a beginner gets sound questions only
     const { ctx: c1, p: p1 } = await open(browser, saveWith(ALL, {}));
     const early = await play(p1, 10, (t) => t, { delayMs: 60 });
-    ok(early.every((s) => !s.wordQuestion), `a beginner never sees a word question (${early.filter((s) => s.wordQuestion).length})`);
+    /* Only the opening stretch: this sim answers everything correctly, so a
+       sound can reach fluency mid-run and be promoted - which is the point of
+       the feature. The picker never repeats the immediate last target, so in
+       five questions no sound can reach the four fast corrects promotion needs. */
+    const opening = early.slice(0, 5);
+    ok(opening.every((s) => !s.wordQuestion),
+      `a child with no history starts on sound questions (${opening.filter((s) => s.wordQuestion).length} word questions in the first 5)`);
+    ok(early.filter((s) => s.wordQuestion).length < 10,
+      'and is not wholesale promoted before earning it');
     await c1.close();
 
     // a child fluent in everything gets word questions

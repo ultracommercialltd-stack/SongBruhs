@@ -71,25 +71,61 @@ colours as a hint.
 is `60 / 110 * 2` seconds and every character is phase-locked to the audio start via a
 negative `animation-delay`, so characters that start singing later stay in step.
 
-## Learning game (Sound Island v1)
+## Sound Island — the phonics game
 
-On top of the mixer sits a phonics game for kids (3–7):
+A phonics game for 3–7s built on top of the mixer. Seven build phases, each
+with its own gate tests (`npm test`). Full plan and rationale in PLAN.md.
 
-- **Profiles** — each kid gets their own save (coins, monsters, creations),
-  stored in `localStorage` on the device. The last active player auto-resumes.
-- **Play** — spoken questions via the browser's speech synthesis. Two tiers:
-  *Little* (3–5): hear a pure sound, tap the monster that says it.
-  *Big* (5–7): hear a word, tap the sound it starts with.
-- **Coins** — +2 per correct answer, streak bonuses every 5.
-- **Monsters** — the s-a-t-p-i-n crew. Each correct answer gives that monster
-  XP; feeding (5 coins) gives more. XP climbs NumBots-style metal tiers:
-  Bronze → Silver → Gold → Diamond → Rainbow.
-- **Shop** — the crew starts with s and a; t, p, i, n are bought with coins.
-- Owned monsters join the roster and can perform on the mixer Stage.
+**Profiles.** Each kid gets a save on the device (coins, monsters, mastery,
+creations, words). The last player auto-resumes.
 
-Note on phoneme audio: browser TTS cannot produce a perfectly clean /t/ or
-/p/, so those prompts use close approximations ("tuh", "puh"). For proper
-phonics precision, swap in recorded voice clips later.
+**Play.** Rounds of five spoken questions with a filling trail. Finish a round
+and the child's own monsters take the stage and perform. There is no difficulty
+setting: the game reads one mastery number per sound and asks mostly about the
+wobbly ones, promoting a sound to word questions once it is fluent.
+
+**Wrong answers teach.** First wrong halves the reward and replays the sound;
+second wrong models the answer — the right monster sings and the child taps it
+to finish. Missed sounds come back two questions later. A distractor that beats
+the same target twice triggers a two-card drill on exactly that pair. Taps
+faster than a child could have listened are treated as slips, not gaps.
+
+**Real voices.** Browser speech cannot make a clean /t/ or /p/ — it says "tuh",
+"puh", the schwa error that makes blending impossible. The family corner has a
+recorder so a parent records the sounds in their own voice; everything falls
+back to speech synthesis until they do.
+
+**The fusion.** Sound monsters sing their own phoneme on the stage, quantised
+to the beat. Stand s, a and t next to each other and they blend: a banner shows
+`s a t → sat` and the word is spoken on the beat. Discovered words fill a
+scrapbook. Arranging the band is arranging phonemes.
+
+**Growing.** Answers and treats raise each monster through visible metal tiers —
+Silver belt, Gold star, Diamond sparkles, Rainbow stripes — drawn on the monster
+everywhere it appears. 19 sounds across four GPC sets; new ones arrive as eggs
+that hum and hatch after the child finds the sound three times in play, paced by
+fluency rather than coins.
+
+**Grown-ups.** Four kid tabs (Play, Monsters, Shop, Stage) plus a hold-to-open
+family door holding the parent card (knows / improving / needs practice, with a
+dinner-table tip from the child's real confusions), the recorder, the character
+creator and player switching. A caption toggle shows the target letter for deaf
+and hard-of-hearing players, labelled honestly as letter-matching.
+
+Nothing is uploaded, there are no ads, purchases, notifications or streak
+punishments, and every word the game speaks is hand-written.
+
+## Tests
+
+```bash
+npm test          # engine invariants + all seven phase gates
+npm run test:engine   # audio: quantisation, loop caching, disposal (jsdom + Tone stub)
+npm run test:gates    # P0..P6 in real Chromium against the production build
+```
+
+Two of these started as exploits found in an audit and are now permanent: an
+audio-blind bot that once scored 100% on the phonics quiz, and a guess-bot that
+once earned full coins by elimination. Both must fail forever.
 
 The stage arrangement itself (which sound is on which slot) is still
 session-only by design.
