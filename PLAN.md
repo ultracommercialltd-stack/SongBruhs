@@ -26,16 +26,22 @@ Rules that govern sequencing:
   lockout blocks taps; flag re-entry verified; v1 saves migrate losslessly.
   Permanent tests: tests/p0-gates.cjs (npm run test:gates).
 
-## P1 — Visible Growth · 2 sessions
-- [ ] Rounds of 5 with progress trail (replaces streak star); round end = owned
-      monsters perform 2 bars on the engine (temp voices until P3)
-- [ ] Metal tiers add visible layers to the monster everywhere (Bronze scarf →
-      Silver headphones → Gold aura → Diamond sparkle → Rainbow costume)
-- [ ] Celebration economy: routine correct = chime + one sung note; voice praise
-      only on round complete / first mastery / level-up
-- [ ] Feeding decoupled from coins→XP exchange; food = occasional round treat
-- Gate: round→performance no dead air; evolution visible on all screens; session has an ending.
-- 🧒 PLAYTEST 1: do they want the round to finish? notice evolutions? replay after the bow?
+## P1 — Visible Growth · 2 sessions — ✅ DONE
+- [x] Rounds of 5 with a filling trail (streak star deleted); the round ends in a
+      Finale where the child's own monsters take the stage and play (temp loops
+      until P3 swaps in chant-voices)
+- [x] Metal tiers draw gear on the monster itself, on every screen: Silver belt+stud,
+      Gold star buckle, Diamond sparkles, Rainbow stripes. Bronze stays bare so
+      the first level-up reads as growth.
+- [x] Celebration economy: routine correct = coin chime only; voice reserved for
+      level-ups and the end of a round
+- [x] Feeding spends treats (earned one per round), never coins
+- Gate PASSED: trail advances 1..5 then finale; finale waits for a tap (a real
+  stopping point); exactly one voice praise per clean round; all four metals
+  render and stay inside the character canvas; feeding spends treats and
+  disables at zero. tests/p1-gates.cjs
+- 🧒 PLAYTEST 1 (still to do with the kids): do they want the round to finish?
+  notice evolutions? replay after the bow?
 
 ## P2 — Real Voices · 1 session
 - [ ] Family-corner recorder flow (MediaRecorder → Opus → base64 in save): 6 phonemes

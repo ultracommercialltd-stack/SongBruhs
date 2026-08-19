@@ -591,6 +591,14 @@ function createEngine() {
     });
   }
 
+  /* immediate (unquantised) UI sounds: instant feedback beats a beat-locked
+     delay for coin chimes and level-ups */
+  const ding = new Tone.Synth({
+    oscillator: { type: 'triangle' },
+    envelope: { attack: 0.001, decay: 0.16, sustain: 0, release: 0.12 },
+  }).connect(master);
+  ding.volume.value = -14;
+
   return {
     transport,
     start() {
@@ -598,6 +606,15 @@ function createEngine() {
         transport.position = 0;
         transport.start('+0.08');
       }
+    },
+    chime() {
+      const t = Tone.now();
+      ding.triggerAttackRelease('E6', '16n', t, 0.7);
+      ding.triggerAttackRelease('A6', '16n', t + 0.09, 0.8);
+    },
+    levelup() {
+      const t = Tone.now();
+      ['A5', 'C6', 'E6', 'A6'].forEach((n, i) => ding.triggerAttackRelease(n, '16n', t + i * 0.09, 0.8));
     },
     sync,
     setMasterMuted(m) { master.gain.rampTo(m ? 0 : 0.78, 0.06); },
@@ -610,7 +627,7 @@ function createEngine() {
         h.nodes.forEach((n) => { try { n.dispose(); } catch (e) { /* noop */ } });
       });
       loops.clear();
-      [master, comp, limiter].forEach((n) => { try { n.dispose(); } catch (e) { /* noop */ } });
+      [ding, master, comp, limiter].forEach((n) => { try { n.dispose(); } catch (e) { /* noop */ } });
     },
   };
 }
@@ -994,7 +1011,70 @@ function Accessory({ kind, accent, detail, topW }) {
   return <g data-part="accessory">{inner}</g>;
 }
 
-function Character({ char, size = 96, singing = false }) {
+/* Metal-tier gear: earned evolution drawn on top of everything, escalating per
+   tier so growth is visible at a glance. Belt zone (y ~242) is the one region
+   no body shape, headgear or accessory occupies, so tiers never collide. */
+const METAL_HEX = { silver: '#cbd5e1', gold: '#fbbf24', diamond: '#7dd3fc' };
+const RAINBOW_HEX = ['#ef6461', '#f4a259', '#f6d365', '#8ac926', '#4ea8de'];
+function Sparkle({ x, y, r, fill }) {
+  /* coerce: JSX passes numeric-looking attributes as strings, and `y + r`
+     would concatenate instead of add, throwing the point off the canvas */
+  const cx = Number(x); const cy = Number(y); const rad = Number(r);
+  const k = rad * 0.3;
+  return (
+    <path
+      d={`M ${cx} ${cy - rad} L ${cx + k} ${cy - k} L ${cx + rad} ${cy} L ${cx + k} ${cy + k} L ${cx} ${cy + rad} L ${cx - k} ${cy + k} L ${cx - rad} ${cy} L ${cx - k} ${cy - k} Z`}
+      fill={fill} stroke={OUTLINE} strokeWidth={2.5} strokeLinejoin="round"
+    />
+  );
+}
+function StarBuckle({ fill }) {
+  const cx = 100; const cy = 248; const a = 13; const b = 5.2;
+  const pts = [];
+  for (let i = 0; i < 10; i++) {
+    const r = i % 2 ? b : a;
+    const ang = -Math.PI / 2 + (i * Math.PI) / 5;
+    pts.push(`${(cx + r * Math.cos(ang)).toFixed(1)},${(cy + r * Math.sin(ang)).toFixed(1)}`);
+  }
+  return <polygon points={pts.join(' ')} fill={fill} stroke={OUTLINE} strokeWidth={3} strokeLinejoin="round" />;
+}
+function MetalGear({ metal }) {
+  if (!metal || metal === 'bronze') return null;
+  const belt = { y: 240, h: 16, x: 62, w: 76 };
+  return (
+    <g data-part="metal" data-metal={metal}>
+      {metal === 'rainbow' ? (
+        <g>
+          {RAINBOW_HEX.map((c, i) => (
+            <rect key={c} x={belt.x + (i * belt.w) / 5} y={belt.y} width={belt.w / 5 + 0.5} height={belt.h} fill={c} />
+          ))}
+          <rect x={belt.x} y={belt.y} width={belt.w} height={belt.h} rx="8" fill="none" stroke={OUTLINE} strokeWidth={4} />
+        </g>
+      ) : (
+        <rect x={belt.x} y={belt.y} width={belt.w} height={belt.h} rx="8"
+          fill={metal === 'silver' ? METAL_HEX.silver : METAL_HEX.gold} stroke={OUTLINE} strokeWidth={4} />
+      )}
+      {metal === 'silver'
+        ? <circle cx="100" cy="248" r="9" fill="#f8fafc" stroke={OUTLINE} strokeWidth={3} />
+        : <StarBuckle fill={metal === 'gold' ? '#fef3c7' : metal === 'diamond' ? METAL_HEX.diamond : '#fdfdfb'} />}
+      {(metal === 'diamond' || metal === 'rainbow') && (
+        <g>
+          <Sparkle x="26" y="104" r="9" fill={METAL_HEX.diamond} />
+          <Sparkle x="174" y="104" r="9" fill={METAL_HEX.diamond} />
+          <Sparkle x="36" y="146" r="6" fill={METAL_HEX.diamond} />
+        </g>
+      )}
+      {metal === 'rainbow' && (
+        <g>
+          <Sparkle x="164" y="146" r="6" fill="#f472b6" />
+          <Sparkle x="152" y="66" r="7" fill="#f6d365" />
+        </g>
+      )}
+    </g>
+  );
+}
+
+function Character({ char, size = 96, singing = false, metal = null }) {
   const shape = BODY_SHAPES[char.body] || BODY_SHAPES.round;
   const body = char.primary;
   return (
@@ -1009,6 +1089,7 @@ function Character({ char, size = 96, singing = false }) {
         {singing ? <SingMouth accent={char.accent} /> : <Mouth kind={char.mouth} accent={char.accent} />}
         <Headgear kind={char.head} accent={char.accent} />
         <Accessory kind={char.acc} accent={char.accent} detail={char.detail} topW={shape.topW} />
+        <MetalGear metal={metal} />
       </svg>
     </div>
   );
@@ -1052,29 +1133,28 @@ const nextMetal = (xp) => METALS.find((m) => m.need > xp) || null;
 const COIN_CORRECT = 2;
 const STREAK_EVERY = 5;
 const STREAK_BONUS = 3;
-const FEED_COST = 5;
-const FEED_XP = 2;
+const FEED_XP = 2;   // feeding costs a treat earned by finishing a round
 
 /* The s-a-t-p-i-n crew. `say` is what the browser voice utters for the pure
    sound — TTS can't make a truly clean /t/ or /p/, so these are the closest
    teachable approximations; swap for recorded clips later. */
 const PHONEMES = [
-  { id: 'ph_s', letter: 's', say: 'ssss', name: 'Sizzo', price: 0,
+  { id: 'ph_s', tempLoop: 'm_arp', letter: 's', say: 'ssss', name: 'Sizzo', price: 0,
     words: ['sun', 'sock', 'sand', 'seal'],
     char: { id: 'ph_s', name: 'Sizzo', body: 'tall', eyes: 'sleepy', mouth: 'smile', head: 'antenna', acc: 'tail', primary: '#3ec9a7', accent: '#7ae582', detail: '#2b2b33' } },
-  { id: 'ph_a', letter: 'a', say: 'a', name: 'Azza', price: 0,
+  { id: 'ph_a', tempLoop: 'v_oh', letter: 'a', say: 'a', name: 'Azza', price: 0,
     words: ['ant', 'apple', 'astronaut', 'ambulance'],
     char: { id: 'ph_a', name: 'Azza', body: 'round', eyes: 'two', mouth: 'grin', head: 'mohawk', acc: 'scarf', primary: '#ef6461', accent: '#ffd166', detail: '#2b2b33' } },
-  { id: 'ph_t', letter: 't', say: 'tuh', name: 'Tikko', price: 25,
+  { id: 'ph_t', tempLoop: 'b_four', letter: 't', say: 'tuh', name: 'Tikko', price: 25,
     words: ['tap', 'ten', 'tiger', 'towel'],
     char: { id: 'ph_t', name: 'Tikko', body: 'hex', eyes: 'square', mouth: 'zig', head: 'cap', acc: 'badge', primary: '#4ea8de', accent: '#5fd0e8', detail: '#ffd166' } },
-  { id: 'ph_p', letter: 'p', say: 'puh', name: 'Popsy', price: 25,
+  { id: 'ph_p', tempLoop: 'm_bell', letter: 'p', say: 'puh', name: 'Popsy', price: 25,
     words: ['pig', 'pan', 'panda', 'puddle'],
     char: { id: 'ph_p', name: 'Popsy', body: 'bell', eyes: 'three', mouth: 'tongue', head: 'antenna', acc: 'phones', primary: '#ef7fae', accent: '#ff8fab', detail: '#ffe9c9' } },
-  { id: 'ph_i', letter: 'i', say: 'ih', name: 'Inko', price: 40,
+  { id: 'ph_i', tempLoop: 'v_blip', letter: 'i', say: 'ih', name: 'Inko', price: 40,
     words: ['ink', 'insect', 'igloo', 'itchy'],
     char: { id: 'ph_i', name: 'Inko', body: 'spike', eyes: 'cyclops', mouth: 'smile', head: 'halo', acc: 'none', primary: '#f6d365', accent: '#fdfdfb', detail: '#2b2b33' } },
-  { id: 'ph_n', letter: 'n', say: 'nnnn', name: 'Nono', price: 40,
+  { id: 'ph_n', tempLoop: 's_root', letter: 'n', say: 'nnnn', name: 'Nono', price: 40,
     words: ['net', 'nose', 'nut', 'ninja'],
     char: { id: 'ph_n', name: 'Nono', body: 'blob', eyes: 'star', mouth: 'fangs', head: 'horns', acc: 'wings', primary: '#9d7bea', accent: '#c58cf5', detail: '#ffd166' } },
 ];
@@ -1088,6 +1168,7 @@ const PRAISE = ['Brilliant!', 'Well done!', 'Amazing!', 'You got it!', 'Super!']
 let cachedVoice;
 function speak(text, opts) {
   try {
+    if (window.__sbSpeechLog) window.__sbSpeechLog.push(text);
     const synth = window.speechSynthesis;
     if (!synth || typeof SpeechSynthesisUtterance === 'undefined') return;
     synth.cancel();
@@ -1112,6 +1193,7 @@ function migrateProfile(p) {
     createdChars: [],
     discovered: [],
     correct: 0,
+    treats: 0,
     ...p,
     stats: p.stats && typeof p.stats === 'object' ? p.stats : {},
   };
@@ -1138,6 +1220,7 @@ function newProfile(name, tier, colour) {
     coins: 10,
     mons: { ph_s: { xp: 0 }, ph_a: { xp: 0 } },
     stats: {},
+    treats: 1,
     createdChars: [],
     discovered: [],
     correct: 0,
@@ -1266,10 +1349,17 @@ function ProfileGate({ save, setSave }) {
   );
 }
 
-/* --- Play tab: the phonics round ------------------------------------------ */
+/* --- Play tab: rounds of five, ending in a live band performance ---------- */
 const LOCKOUT_MS = 1000;   // pause after a wrong tap: interrupts machine-gun guessing
 const FAST_MS = 3000;      // a clean correct under this counts as fluent
-const CELEBRATE_MS = 1500;
+const CELEBRATE_MS = 1200;
+const ROUND_LEN = 5;
+
+/* The metal a monster is currently wearing, for any screen that draws it. */
+function metalFor(profile, charId) {
+  const owned = profile && profile.mons[charId];
+  return owned ? metalOf(owned.xp).key : null;
+}
 
 function makeQuestion(profile, lastTargetId, forcedId) {
   const owned = PHONEMES.filter((p) => profile.mons[p.id]);
@@ -1300,50 +1390,114 @@ function promptFor(q, tier) {
 const emptyStat = () => ({ asked: 0, right: 0, fastRight: 0, wrong: 0, totalMs: 0, confusions: {} });
 const statOf = (pr, id) => pr.stats[id] || emptyStat();
 
-function LearnTab({ profile, updateProfile, setToast }) {
+/* The round payoff: the child's own monsters take the stage and play. */
+function Finale({ profile, coins, onAgain }) {
+  const band = PHONEMES.filter((p) => profile.mons[p.id]);
+  const bobDelay = useMemo(() => phase(BOB_SEC), []);
+  return (
+    <div className="sb-rise mx-auto max-w-lg text-center" data-finale="1">
+      <p className="text-2xl font-black text-amber-300">Show time!</p>
+      <p className="mt-1 text-sm text-neutral-400">Your band is playing your round.</p>
+      <div className="sb-scroll mt-4 flex items-end justify-center gap-1 overflow-x-auto rounded-3xl border-2 border-amber-300 bg-neutral-900 px-2 py-4">
+        {band.map((p) => (
+          <div
+            key={p.id}
+            className="sb-anim shrink-0"
+            style={{ animation: `sb-bob ${BOB_SEC}s ease-in-out infinite`, animationDelay: bobDelay }}
+          >
+            <Character char={p.char} size={66} singing metal={metalFor(profile, p.id)} />
+          </div>
+        ))}
+      </div>
+      <div className="mt-4 flex items-center justify-center gap-4">
+        <span className="flex items-center gap-1 text-lg font-black text-amber-300">
+          <Coins className="h-5 w-5" /> +{coins}
+        </span>
+        <span className="flex items-center gap-1 text-lg font-black text-neutral-200">
+          <Cookie className="h-5 w-5" /> +1
+        </span>
+      </div>
+      <button
+        type="button"
+        onClick={onAgain}
+        className="mt-5 flex min-h-16 w-full items-center justify-center gap-2 rounded-3xl bg-amber-400 text-lg font-black text-neutral-950 hover:bg-amber-300"
+      >
+        <Play className="h-5 w-5" fill="currentColor" /> Another round!
+      </button>
+      <p className="mt-3 text-xs text-neutral-600">Or go feed your monsters — the show will be here tomorrow.</p>
+    </div>
+  );
+}
+
+function LearnTab({ profile, updateProfile, setToast, sfx, onPerform, onStopPerform }) {
   const flagRef = useRef([]);            // missed sounds queued to return: {id, countdown}
   const [q, setQ] = useState(() => makeQuestion(profile, null, null));
-  const [phase, setPhase] = useState('ask');   // ask | model | correct
+  const [phaseState, setPhaseState] = useState('ask');   // ask | model | correct | finale
   const [wrongCount, setWrongCount] = useState(0);
   const [wrongId, setWrongId] = useState(null);
   const [locked, setLocked] = useState(false);
-  const [streak, setStreak] = useState(0);
+  const [done, setDone] = useState(0);                   // questions completed this round
+  const [roundCoins, setRoundCoins] = useState(0);
   const askedAtRef = useRef(0);
   const firstTapMsRef = useRef(null);
   const timer = useRef(null);
+  const doneRef = useRef(0);
 
   useEffect(() => () => clearTimeout(timer.current), []);
   useEffect(() => {
+    if (phaseState !== 'ask') return;
     askedAtRef.current = performance.now();
     speak(promptFor(q, profile.tier));
-  }, [q]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [q, phaseState]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const next = useCallback(() => {
-    flagRef.current.forEach((f) => { f.countdown -= 1; });
-    const due = flagRef.current.find((f) => f.countdown <= 0);
-    if (due) flagRef.current = flagRef.current.filter((f) => f !== due);
-    setQ((old) => makeQuestion(profile, old.target.id, due ? due.id : null));
-    setPhase('ask');
+  const startRound = useCallback(() => {
+    onStopPerform();
+    doneRef.current = 0;
+    setDone(0);
+    setRoundCoins(0);
+    setPhaseState('ask');
     setWrongCount(0);
     setWrongId(null);
     setLocked(false);
     firstTapMsRef.current = null;
-  }, [profile]);
+    setQ((old) => makeQuestion(profile, old.target.id, null));
+  }, [profile, onStopPerform]);
+
+  /* advance after a completed question: next question, or end the round */
+  const advance = useCallback(() => {
+    doneRef.current += 1;
+    setDone(doneRef.current);
+    if (doneRef.current >= ROUND_LEN) {
+      const band = PHONEMES.filter((p) => profile.mons[p.id]).map((p) => p.tempLoop).filter(Boolean);
+      updateProfile((pr) => ({ ...pr, treats: (pr.treats || 0) + 1 }));
+      onPerform(band);
+      speak('What a show! Your band sounds amazing!');
+      setPhaseState('finale');
+      return;
+    }
+    flagRef.current.forEach((f) => { f.countdown -= 1; });
+    const due = flagRef.current.find((f) => f.countdown <= 0);
+    if (due) flagRef.current = flagRef.current.filter((f) => f !== due);
+    setQ((old) => makeQuestion(profile, old.target.id, due ? due.id : null));
+    setPhaseState('ask');
+    setWrongCount(0);
+    setWrongId(null);
+    setLocked(false);
+    firstTapMsRef.current = null;
+  }, [profile, updateProfile, onPerform]);
 
   const finishCorrect = (p, clean) => {
-    setPhase('correct');
+    setPhaseState('correct');
     const ms = firstTapMsRef.current == null ? FAST_MS : firstTapMsRef.current;
     const coins = clean ? COIN_CORRECT : 1;
-    const newStreak = clean ? streak + 1 : 0;
-    setStreak(newStreak);
-    const bonus = clean && newStreak > 0 && newStreak % STREAK_EVERY === 0 ? STREAK_BONUS : 0;
     const prevXp = profile.mons[p.id].xp;
     const grew = metalOf(prevXp + 1).key !== metalOf(prevXp).key;
+    setRoundCoins((c) => c + coins);
     updateProfile((pr) => {
       const s = statOf(pr, p.id);
       return {
         ...pr,
-        coins: pr.coins + coins + bonus,
+        coins: pr.coins + coins,
         correct: pr.correct + 1,
         mons: { ...pr.mons, [p.id]: { xp: pr.mons[p.id].xp + 1 } },
         stats: {
@@ -1358,28 +1512,30 @@ function LearnTab({ profile, updateProfile, setToast }) {
         },
       };
     });
-    const praise = PRAISE[Math.floor(Math.random() * PRAISE.length)];
-    if (profile.tier === 'B') speak(`${praise} ${q.word} starts with ${p.say}!`);
-    else speak(grew ? `${praise} ${p.name} is now ${metalOf(prevXp + 1).label}!` : bonus ? `${praise} ${newStreak} in a row!` : `${praise} ${p.say}!`);
-    if (grew) setToast(`${p.name} reached ${metalOf(prevXp + 1).label}!`);
-    else if (bonus) setToast(`Streak! +${STREAK_BONUS} bonus coins`);
-    timer.current = setTimeout(next, CELEBRATE_MS);
+    /* Celebration economy: routine successes get a sound, not a speech. Voice
+       is reserved for level-ups and the end of a round so it keeps meaning. */
+    if (grew) {
+      sfx.levelup();
+      speak(`${p.name} is now ${metalOf(prevXp + 1).label}!`);
+      setToast(`${p.name} reached ${metalOf(prevXp + 1).label}!`);
+    } else {
+      sfx.chime();
+    }
+    timer.current = setTimeout(advance, grew ? CELEBRATE_MS + 700 : CELEBRATE_MS);
   };
 
   const answer = (p) => {
-    if (locked || phase === 'correct') return;
+    if (locked || phaseState === 'correct' || phaseState === 'finale') return;
 
-    if (phase === 'model') {
+    if (phaseState === 'model') {
       if (p.id !== q.target.id) return;
-      // modelled completion: the child still performs the correct action,
-      // but a fully assisted question pays nothing and counts as a miss
-      setPhase('correct');
+      setPhaseState('correct');
       updateProfile((pr) => {
         const s = statOf(pr, q.target.id);
         return { ...pr, stats: { ...pr.stats, [q.target.id]: { ...s, asked: s.asked + 1, wrong: s.wrong + 1 } } };
       });
       speak(`That's it! ${q.target.say}! ${q.target.say}!`);
-      timer.current = setTimeout(next, CELEBRATE_MS);
+      timer.current = setTimeout(advance, CELEBRATE_MS);
       return;
     }
 
@@ -1390,10 +1546,8 @@ function LearnTab({ profile, updateProfile, setToast }) {
       return;
     }
 
-    // wrong tap
     const wc = wrongCount + 1;
     setWrongCount(wc);
-    setStreak(0);
     setWrongId(p.id);
     setLocked(true);
     updateProfile((pr) => {
@@ -1407,13 +1561,12 @@ function LearnTab({ profile, updateProfile, setToast }) {
       };
     });
     if (wc >= 2) {
-      // second wrong: model the answer, flag the sound to return soon
       flagRef.current.push({ id: q.target.id, countdown: 2 });
       speak(`Listen! This one says ${q.target.say}. Tap ${q.target.name}!`);
       timer.current = setTimeout(() => {
         setWrongId(null);
         setLocked(false);
-        setPhase('model');
+        setPhaseState('model');
       }, LOCKOUT_MS);
     } else {
       speak(`That one says ${p.say}.`);
@@ -1425,21 +1578,35 @@ function LearnTab({ profile, updateProfile, setToast }) {
     }
   };
 
-  const revealWord = phase === 'correct' && profile.tier === 'B' && q.word;
+  if (phaseState === 'finale') {
+    return <Finale profile={profile} coins={roundCoins} onAgain={startRound} />;
+  }
+
+  const revealWord = phaseState === 'correct' && profile.tier === 'B' && q.word;
 
   return (
     <div className="mx-auto max-w-lg">
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between gap-3">
         <button
           type="button"
           onClick={() => speak(promptFor(q, profile.tier))}
+          aria-label="Hear it again"
           className="flex min-h-12 items-center gap-2 rounded-2xl border-2 border-neutral-700 bg-neutral-900 px-4 text-sm font-black text-neutral-100 hover:border-amber-300"
         >
           <RotateCcw className="h-4 w-4 text-amber-300" /> Hear it again
         </button>
-        <span className="flex items-center gap-1 text-sm font-black text-amber-300">
-          <Star className="h-4 w-4" fill="currentColor" /> {streak}
-        </span>
+        {/* round trail: five slots filling toward the show */}
+        <div className="flex items-center gap-1.5" data-trail={done}>
+          {Array.from({ length: ROUND_LEN }, (_, i) => (
+            <span
+              key={i}
+              className={[
+                'h-4 w-4 rounded-full border-2',
+                i < done ? 'border-amber-300 bg-amber-300' : 'border-neutral-700 bg-neutral-900',
+              ].join(' ')}
+            />
+          ))}
+        </div>
       </div>
 
       <div className="mt-3 min-h-20 rounded-3xl border-2 border-neutral-800 bg-neutral-900 p-4 text-center">
@@ -1447,23 +1614,23 @@ function LearnTab({ profile, updateProfile, setToast }) {
           <p className="text-2xl font-black text-neutral-100" data-reveal={q.word}>
             <span className="text-amber-300">{q.word[0]}</span>{q.word.slice(1)}
           </p>
-        ) : phase === 'model' ? (
+        ) : phaseState === 'model' ? (
           <p className="text-lg font-black text-amber-300">Tap the monster that sings the sound!</p>
         ) : profile.tier === 'B' ? (
           <p className="text-lg font-black text-neutral-100">Listen! What sound does the word start with?</p>
         ) : (
           <p className="text-lg font-black text-neutral-100">Find the monster that says the sound!</p>
         )}
-        {phase === 'ask' && (
+        {phaseState === 'ask' && (
           <p className="mt-1 text-xs text-neutral-500">Tap “Hear it again” as many times as you like</p>
         )}
       </div>
 
-      <div className="mt-3 grid grid-cols-3 gap-2" data-target={q.target.id} data-phase={phase}>
+      <div className="mt-3 grid grid-cols-3 gap-2" data-target={q.target.id} data-phase={phaseState}>
         {q.choices.map((p) => {
           const isTarget = p.id === q.target.id;
-          const celebrate = phase !== 'ask' && isTarget;
-          const dimmed = phase === 'model' && !isTarget;
+          const celebrate = phaseState !== 'ask' && isTarget;
+          const dimmed = phaseState === 'model' && !isTarget;
           return (
             <button
               key={p.id}
@@ -1479,7 +1646,7 @@ function LearnTab({ profile, updateProfile, setToast }) {
               ].join(' ')}
             >
               <div className={celebrate ? 'sb-anim' : ''} style={celebrate ? { animation: `sb-bob ${BOB_SEC}s ease-in-out infinite` } : undefined}>
-                <Character char={p.char} size={64} singing={celebrate} />
+                <Character char={p.char} size={64} singing={celebrate} metal={metalFor(profile, p.id)} />
               </div>
               <span className="mt-1 text-4xl font-black text-neutral-100">{p.letter}</span>
             </button>
@@ -1488,25 +1655,26 @@ function LearnTab({ profile, updateProfile, setToast }) {
       </div>
 
       <p className="mt-3 text-center text-xs text-neutral-600">
-        +{COIN_CORRECT} coins for every right answer · streaks of {STREAK_EVERY} earn a bonus
+        {ROUND_LEN - done} more to the show
       </p>
     </div>
   );
 }
 
 /* --- Monsters tab: roster, feeding, metals -------------------------------- */
-function MonstersTab({ profile, updateProfile, setToast, onGoShop }) {
+function MonstersTab({ profile, updateProfile, setToast, onGoShop, sfx }) {
+  const treats = profile.treats || 0;
   const feed = (p) => {
-    if (profile.coins < FEED_COST) { speak('You need more coins! Play to earn some.'); return; }
+    if (treats < 1) { speak('No treats left! Finish a round to earn one.'); return; }
     const prevXp = profile.mons[p.id].xp;
     const grew = metalOf(prevXp + FEED_XP).key !== metalOf(prevXp).key;
     updateProfile((pr) => ({
       ...pr,
-      coins: pr.coins - FEED_COST,
+      treats: (pr.treats || 0) - 1,
       mons: { ...pr.mons, [p.id]: { xp: pr.mons[p.id].xp + FEED_XP } },
     }));
-    speak(grew ? `Yum! ${p.name} is now ${metalOf(prevXp + FEED_XP).label}!` : `Yum yum! Thank you!`, { pitch: 1.3 });
-    if (grew) setToast(`${p.name} reached ${metalOf(prevXp + FEED_XP).label}!`);
+    if (grew) { sfx.levelup(); setToast(`${p.name} reached ${metalOf(prevXp + FEED_XP).label}!`); }
+    speak(grew ? `Yum! ${p.name} is now ${metalOf(prevXp + FEED_XP).label}!` : 'Yum yum! Thank you!', { pitch: 1.3 });
   };
 
   return (
@@ -1535,7 +1703,7 @@ function MonstersTab({ profile, updateProfile, setToast, onGoShop }) {
         return (
           <div key={p.id} className={`rounded-3xl border-2 ${m.border} bg-neutral-900 p-3`}>
             <div className="flex items-center gap-3">
-              <Character char={p.char} size={56} />
+              <Character char={p.char} size={56} metal={m.key} />
               <div className="min-w-0 flex-1">
                 <p className="flex items-center gap-2 text-base font-black text-neutral-100">
                   {p.name} <span className="text-2xl text-amber-300">{p.letter}</span>
@@ -1565,10 +1733,10 @@ function MonstersTab({ profile, updateProfile, setToast, onGoShop }) {
               <button
                 type="button"
                 onClick={() => feed(p)}
-                disabled={!nm}
+                disabled={!nm || treats < 1}
                 className="flex min-h-12 items-center justify-center gap-1 rounded-2xl bg-amber-400 text-xs font-black text-neutral-950 hover:bg-amber-300 disabled:opacity-40"
               >
-                <Cookie className="h-4 w-4" /> Feed ({FEED_COST} <Coins className="h-3 w-3" />)
+                <Cookie className="h-4 w-4" /> Feed ({treats})
               </button>
             </div>
           </div>
@@ -1789,7 +1957,7 @@ function Slot({ index, slot, sound, singing, comboLit, onTap, selectedFamilyHex 
             : undefined
         }
       >
-        <Character char={slot.char} size={72} singing={singing} />
+        <Character char={slot.char} size={72} singing={singing} metal={slot.metal} />
       </div>
       <div className="mt-1 h-10 w-full">
         {sound ? (
@@ -2066,6 +2234,7 @@ export default function SongBruhs() {
   const [draft, setDraft] = useState(() => ({ ...randomChar(), name: 'New Bruh' }));
   const [dragging, setDragging] = useState(null);
   const [toast, setToast] = useState(null);
+  const [showtime, setShowtime] = useState(null);   // loop ids performing right now
 
   const profile = save.active ? save.profiles.find((pr) => pr.id === save.active) : null;
   useEffect(() => { persistSave(save); }, [save]);
@@ -2103,12 +2272,18 @@ export default function SongBruhs() {
     ...s,
     char: charById[s.charId] || roster[0],
     sound: s.soundId ? SOUND_BY_ID[s.soundId] : null,
-  })), [slots, charById, roster]);
+    metal: metalFor(profile, s.charId),
+  })), [slots, charById, roster, profile]);
 
   const activeIds = useMemo(() => slots.map((s) => s.soundId).filter(Boolean), [slots]);
 
   /* --- what the engine should be playing -------------------------------- */
   const desired = useMemo(() => {
+    if (showtime) {
+      const perf = new Map();
+      showtime.forEach((id) => perf.set(id, 1));
+      return perf;
+    }
     const anySolo = slots.some((s) => s.soundId && s.solo);
     const map = new Map();
     slots.forEach((s) => {
@@ -2117,7 +2292,7 @@ export default function SongBruhs() {
       map.set(s.soundId, audible ? 1 : 0);
     });
     return map;
-  }, [slots]);
+  }, [slots, showtime]);
 
   const liveCombos = useMemo(
     () => COMBOS.filter((c) => c.ids.every((id) => desired.get(id) === 1)),
@@ -2167,10 +2342,21 @@ export default function SongBruhs() {
   }, []);
 
   useEffect(() => {
+    if (tab !== 'play' && showtime) setShowtime(null);
+  }, [tab, showtime]);
+
+  useEffect(() => {
     if (!toast) return undefined;
     const t = setTimeout(() => setToast(null), 1800);
     return () => clearTimeout(t);
   }, [toast]);
+
+  const sfx = useMemo(() => ({
+    chime: () => { if (engineRef.current) engineRef.current.chime(); },
+    levelup: () => { if (engineRef.current) engineRef.current.levelup(); },
+  }), []);
+  const onPerform = useCallback((loopIds) => setShowtime(loopIds.length ? loopIds : null), []);
+  const onStopPerform = useCallback(() => setShowtime(null), []);
 
   const handleStart = useCallback(async () => {
     try {
@@ -2333,6 +2519,13 @@ export default function SongBruhs() {
         <span className="hidden text-xs font-semibold text-neutral-600 sm:inline">110 BPM · A MINOR</span>
         <div className="ml-auto flex items-center gap-2">
           <CoinPill coins={profile.coins} />
+          <span
+            aria-label={`${profile.treats || 0} treats`}
+            data-treats={profile.treats || 0}
+            className="hidden h-12 items-center gap-1 rounded-full border-2 border-neutral-700 bg-neutral-900 px-3 text-base font-black text-neutral-200 sm:flex"
+          >
+            <Cookie className="h-5 w-5" /> {profile.treats || 0}
+          </span>
           <button
             type="button"
             onClick={() => setSave((sv) => ({ ...sv, active: null }))}
@@ -2374,11 +2567,19 @@ export default function SongBruhs() {
 
       <main className="relative mt-2 px-3 sm:px-5">
         {tab === 'play' && (
-          <LearnTab key={profile.id} profile={profile} updateProfile={updateProfile} setToast={setToast} />
+          <LearnTab
+            key={profile.id}
+            profile={profile}
+            updateProfile={updateProfile}
+            setToast={setToast}
+            sfx={sfx}
+            onPerform={onPerform}
+            onStopPerform={onStopPerform}
+          />
         )}
 
         {tab === 'monsters' && (
-          <MonstersTab profile={profile} updateProfile={updateProfile} setToast={setToast} onGoShop={() => setTab('shop')} />
+          <MonstersTab profile={profile} updateProfile={updateProfile} setToast={setToast} onGoShop={() => setTab('shop')} sfx={sfx} />
         )}
 
         {tab === 'shop' && (

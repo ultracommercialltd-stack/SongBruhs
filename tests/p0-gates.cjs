@@ -40,11 +40,25 @@ const phaseOf = async (p) => grid(p).getAttribute('data-phase');
 const targetOf = async (p) => grid(p).getAttribute('data-target');
 const coinsOf = async (p) => Number(await p.locator('[data-coins]').getAttribute('data-coins'));
 
-async function waitPhase(p, want, ms = 6000) {
+/* Since P1 the drill runs in rounds of five, so any wait may land on the
+   band finale instead of the next question. Wait for either, then move on. */
+async function waitPhase(p, want, ms = 8000) {
   await p.waitForFunction(
-    (w) => document.querySelector('[data-target]') && document.querySelector('[data-target]').getAttribute('data-phase') === w,
+    (w) => {
+      if (document.querySelector('[data-finale]')) return true;
+      const g = document.querySelector('[data-target]');
+      return g && g.getAttribute('data-phase') === w;
+    },
     want, { timeout: ms },
   );
+}
+async function clearFinale(p) {
+  if (await p.locator('[data-finale]').count()) {
+    await p.getByRole('button', { name: /Another round/ }).click();
+    await p.waitForSelector('[data-target]');
+    return true;
+  }
+  return false;
 }
 const readReveal = (p) => p.evaluate(() => {
   const el = document.querySelector('[data-reveal]');
@@ -68,6 +82,7 @@ async function finishQuestion(p) {
   }
   const revealed = await readReveal(p);
   await waitPhase(p, 'ask');
+  await clearFinale(p);
   return revealed;
 }
 
@@ -83,6 +98,7 @@ async function finishQuestion(p) {
     let captured = 0;
     const N = 20;
     for (let i = 0; i < N; i++) {
+      await clearFinale(p);
       // snapshot what a deaf bot can read during the ask phase...
       const askText = (await p.locator('main').innerText()).toLowerCase();
       await p.locator('[data-choice]').first().click();
@@ -116,6 +132,7 @@ async function finishQuestion(p) {
       await waitPhase(p, 'model');
       await p.locator(`[data-choice="${target}"]`).click();
       await waitPhase(p, 'ask');
+      await clearFinale(p);
     }
     const after = await coinsOf(p);
     ok(after - before === 0, `elimination earns nothing: ${before} -> ${after} coins over ${N} questions`);
@@ -143,6 +160,7 @@ async function finishQuestion(p) {
     // tier-B reveal appears only now
     ok((await p.locator('[data-reveal]').count()) === 1, 'word revealed after answering (tier B)');
     await waitPhase(p, 'ask');
+    await clearFinale(p);
 
     // flag re-entry: force a modelled miss, expect the target back within 3
     target = await targetOf(p);
@@ -155,6 +173,7 @@ async function finishQuestion(p) {
     await waitPhase(p, 'model');
     await p.locator(`[data-choice="${target}"]`).click();
     await waitPhase(p, 'ask');
+    await clearFinale(p);
     let seen = false;
     for (let i = 0; i < 3 && !seen; i++) {
       if ((await targetOf(p)) === target) { seen = true; break; }
