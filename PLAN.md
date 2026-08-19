@@ -57,17 +57,22 @@ Rules that govern sequencing:
   partial set mixes cleanly; clips survive reload and never enter the game
   save; a blocked mic explains itself. tests/p2-gates.cjs
 
-## P3 — The Fusion · 2–3 sessions  ← the audit's #1 fix
-- [ ] Chant-voices: buildChant() loop (Tone.Player + gate, quantised "1m") per phoneme
-      monster; placing one on stage defaults to its own sound
-- [ ] Blend bridge: adjacent slots spelling a known VC/CVC word → chants converge
-      each bar → whole-word clip pops on the downbeat + banner
-- [ ] Word combos: discovered words fill a scrapbook (Combos panel becomes this)
-- [ ] Round payoff upgraded to chant-voices
-- Gate: chant entries quantised (extend existing test); s-a-t fires reliably;
-  8 layers incl. chants under the limiter; no node leaks on add/remove.
-- 🧒 PLAYTEST 2: give the younger child s,a,t and no instructions. Discovery? Says the
-  word aloud? Rearranges to repeat it? If no → iterate telegraphing before P4+.
+## P3 — The Fusion · 2–3 sessions — ✅ DONE  ← the audit's #1 fix
+- [x] Chant-voices: a rhythm loop per phoneme playing the parent's recorded
+      sound (Tone.Player), with a synthesised stand-in before recording.
+      Placing a sound monster on a slot gives it its own voice by default, and
+      the slot names the phoneme it is singing.
+- [x] Blend bridge: adjacent slots spelling a decodable word light a banner
+      (s a t → sat) and speak the whole word on the beat
+- [x] Word scrapbook: discovered words persist per child; the Combos tab now
+      leads with them
+- [x] Round finale plays the child's own band
+- Gate PASSED: s+a+t fires "sat", breaking the run clears it, p+a+n fires
+  "pan", six simultaneous chants run clean, the scrapbook persists across
+  reload. Chant quantisation is proved in tests/engine.cjs (every entry on a
+  bar downbeat, all nodes disposed on unmount).
+- 🧒 PLAYTEST 2 (still to do): give the younger child s,a,t and no instructions.
+  Discovery? Says the word aloud? Rearranges to repeat it?
 
 ## P4 — The Quiet Teacher · 2 sessions
 - [ ] Mastery per sound: fast correct +1, slow/replayed +0.5, wrong −1 (0..5)

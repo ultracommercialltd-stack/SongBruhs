@@ -4,7 +4,7 @@ import {
   Play, Volume2, VolumeX, Shuffle, Trash2, X, Check, Sparkles,
   Music, Wand2, Headphones, Users, Ban,
   Coins, Cookie, Medal, Lock, RotateCcw, Star, Ear, Heart, ShoppingBag,
-  Mic, Square,
+  Mic, Square, BookOpen,
 } from 'lucide-react';
 
 /* ==========================================================================
@@ -1195,6 +1195,7 @@ function migrateProfile(p) {
     discovered: [],
     correct: 0,
     treats: 0,
+    words: [],
     ...p,
     stats: p.stats && typeof p.stats === 'object' ? p.stats : {},
   };
@@ -1222,6 +1223,7 @@ function newProfile(name, tier, colour) {
     mons: { ph_s: { xp: 0 }, ph_a: { xp: 0 } },
     stats: {},
     treats: 1,
+    words: [],
     createdChars: [],
     discovered: [],
     correct: 0,
@@ -1458,6 +1460,171 @@ function VoiceRecorder({ clips, setClips, onClose }) {
     </div>
   );
 }
+
+/* ==========================================================================
+   THE FUSION — phoneme monsters sing their own sound on the stage, and
+   adjacent monsters spelling a word blend it out loud.
+
+   This is what makes the mixer the lesson rather than the reward: arranging
+   the band IS arranging phonemes, and putting s-a-t side by side is blending.
+   ========================================================================== */
+
+/* Decodable words the blend bridge can fire, built only from the six starting
+   graphemes. Hand-curated: every word a child hears is checked, never
+   generated. `parts` are the phoneme ids in order. */
+const BLEND_WORDS = [
+  { word: 'at', parts: ['ph_a', 'ph_t'] },
+  { word: 'an', parts: ['ph_a', 'ph_n'] },
+  { word: 'as', parts: ['ph_a', 'ph_s'] },
+  { word: 'it', parts: ['ph_i', 'ph_t'] },
+  { word: 'in', parts: ['ph_i', 'ph_n'] },
+  { word: 'is', parts: ['ph_i', 'ph_s'] },
+  { word: 'up', parts: ['ph_a', 'ph_p'] },   // 'ap' is not a word; keep the pair out
+  { word: 'sat', parts: ['ph_s', 'ph_a', 'ph_t'] },
+  { word: 'sap', parts: ['ph_s', 'ph_a', 'ph_p'] },
+  { word: 'sit', parts: ['ph_s', 'ph_i', 'ph_t'] },
+  { word: 'sin', parts: ['ph_s', 'ph_i', 'ph_n'] },
+  { word: 'sip', parts: ['ph_s', 'ph_i', 'ph_p'] },
+  { word: 'tap', parts: ['ph_t', 'ph_a', 'ph_p'] },
+  { word: 'tan', parts: ['ph_t', 'ph_a', 'ph_n'] },
+  { word: 'tin', parts: ['ph_t', 'ph_i', 'ph_n'] },
+  { word: 'tip', parts: ['ph_t', 'ph_i', 'ph_p'] },
+  { word: 'pat', parts: ['ph_p', 'ph_a', 'ph_t'] },
+  { word: 'pan', parts: ['ph_p', 'ph_a', 'ph_n'] },
+  { word: 'pin', parts: ['ph_p', 'ph_i', 'ph_n'] },
+  { word: 'pit', parts: ['ph_p', 'ph_i', 'ph_t'] },
+  { word: 'nap', parts: ['ph_n', 'ph_a', 'ph_p'] },
+  { word: 'nip', parts: ['ph_n', 'ph_i', 'ph_p'] },
+  { word: 'nit', parts: ['ph_n', 'ph_i', 'ph_t'] },
+];
+/* 'up' above needs /u/, which is not in this set — drop it rather than teach
+   a grapheme the child has not met. */
+const WORDS = BLEND_WORDS.filter((w) => w.parts.every((id) => PHONEME_BY_ID[id]) && w.word !== 'up');
+
+/* Find the longest run of adjacent occupied slots that spells a word. */
+function findBlend(slotChars) {
+  let best = null;
+  for (let i = 0; i < slotChars.length; i++) {
+    for (const w of WORDS) {
+      const n = w.parts.length;
+      if (i + n > slotChars.length) continue;
+      let match = true;
+      for (let k = 0; k < n; k++) if (slotChars[i + k] !== w.parts[k]) { match = false; break; }
+      if (match && (!best || n > best.parts.length)) best = { ...w, from: i };
+    }
+  }
+  return best;
+}
+
+/* A chant loop: the monster's own recorded sound, gated onto the beat.
+   Uses the same lazy-build + quantised-gate machinery as every other loop,
+   so a chant enters on the downbeat exactly like a drum pattern. */
+function buildChant(bus, cfg) {
+  const nodes = [];
+  const parts = [];
+  const player = new Tone.Player({ url: cfg.url, autostart: false, fadeOut: 0.02 });
+  player.connect(bus);
+  player.volume.value = -3;
+  nodes.push(player);
+  const seq = new Tone.Sequence((time, i) => {
+    if (!cfg.steps[i]) return;
+    try {
+      if (player.loaded) player.start(time, 0, cfg.dur);
+    } catch (e) { /* overlapping retrigger */ }
+  }, IDX32, '16n');
+  seq.loop = true;
+  parts.push(seq);
+  return { nodes, parts };
+}
+
+/* Synthesised stand-in when a sound has not been recorded yet: a short
+   filtered-noise or tone hit in the phoneme's character, so the stage still
+   works before the parent records. Not a substitute for a real voice. */
+function buildChantFallback(bus, cfg) {
+  const filt = new Tone.Filter({ type: cfg.voiced ? 'bandpass' : 'highpass', frequency: cfg.freq, Q: cfg.voiced ? 4 : 1 }).connect(bus);
+  const src = cfg.voiced
+    ? new Tone.AMSynth({ harmonicity: 1.4, oscillator: { type: 'sine' }, envelope: { attack: 0.02, decay: 0.1, sustain: 0.7, release: 0.08 } })
+    : new Tone.NoiseSynth({ noise: { type: 'white' }, envelope: { attack: 0.004, decay: 0.09, sustain: 0.2, release: 0.05 } });
+  src.connect(filt);
+  src.volume.value = cfg.voiced ? -16 : -22;
+  const seq = new Tone.Sequence((time, i) => {
+    if (!cfg.steps[i]) return;
+    if (cfg.voiced) src.triggerAttackRelease(cfg.note, cfg.dur, time, cfg.steps[i]);
+    else src.triggerAttackRelease(cfg.dur, time, cfg.steps[i]);
+  }, IDX32, '16n');
+  seq.loop = true;
+  return { nodes: [src, filt], parts: [seq] };
+}
+
+/* Each phoneme chants on its own rhythm so a stacked band stays legible. */
+const CHANT_STEPS = {
+  ph_s: 'x...x...x...x...x...x...x...x...',
+  ph_a: 'x.......x.......x.......x.......',
+  ph_t: '..x...x...x...x...x...x...x...x.',
+  ph_p: '....x.......x.......x.......x...',
+  ph_i: 'x...........x...........x.......',
+  ph_n: '..x.......x.......x.......x.....',
+};
+const CHANT_TONE = {
+  ph_s: { voiced: false, freq: 5200, note: 'A4' },
+  ph_a: { voiced: true, freq: 800, note: 'A3' },
+  ph_t: { voiced: false, freq: 3200, note: 'C4' },
+  ph_p: { voiced: false, freq: 1400, note: 'D4' },
+  ph_i: { voiced: true, freq: 1900, note: 'E4' },
+  ph_n: { voiced: true, freq: 420, note: 'G3' },
+};
+
+/* Register a chant loop per phoneme. Loops are defined once at module load and
+   built lazily by the engine on first use, exactly like the music loops. */
+PHONEMES.forEach((ph) => {
+  const steps = pat(CHANT_STEPS[ph.id]);
+  const tone = CHANT_TONE[ph.id];
+  ALL_DEFS[`chant_${ph.id}`] = {
+    id: `chant_${ph.id}`,
+    family: 'voice',
+    level: 0.85,
+    build: (bus) => {
+      const url = clipRegistry[`s:${ph.id}`];
+      return url
+        ? buildChant(bus, { url, steps, dur: 0.32 })
+        : buildChantFallback(bus, { ...tone, steps, dur: '16n' });
+    },
+  };
+});
+
+/* A stage slot needs a display name for whatever it is playing. Chants are not
+   in the music library, so resolve them to the phoneme they sing. */
+function soundInfoFor(soundId) {
+  if (!soundId) return null;
+  if (SOUND_BY_ID[soundId]) return SOUND_BY_ID[soundId];
+  if (soundId.indexOf('chant_') === 0) {
+    const ph = PHONEME_BY_ID[soundId.slice('chant_'.length)];
+    if (ph) return { id: soundId, family: 'voice', name: `“${ph.letter}” sound`, glyph: 'ring' };
+  }
+  return null;
+}
+
+/* The bridge itself: a bonus layer that speaks the whole word on the downbeat
+   of every second bar, so the child hears the parts converge into the word. */
+WORDS.forEach((w) => {
+  ALL_DEFS[`blend_${w.word}`] = {
+    id: `blend_${w.word}`,
+    family: 'melody',
+    level: 1,
+    fade: 0.4,
+    build: (bus) => {
+      const gain = new Tone.Gain(1).connect(bus);
+      const part = loopPart((time) => {
+        const clip = clipRegistry[`w:${w.word}`];
+        Tone.getDraw().schedule(() => {
+          if (clip) playClip(`w:${w.word}`);
+          else speak(w.word, { rate: 0.8 });
+        }, time);
+      }, [{ time: '1:2:0' }]);
+      return { nodes: [gain], parts: [part] };
+    },
+  };
+});
 
 /* ==========================================================================
    GAME UI PIECES
@@ -2510,7 +2677,7 @@ export default function SongBruhs() {
   const view = useMemo(() => slots.map((s) => ({
     ...s,
     char: charById[s.charId] || roster[0],
-    sound: s.soundId ? SOUND_BY_ID[s.soundId] : null,
+    sound: soundInfoFor(s.soundId),
     metal: metalFor(profile, s.charId),
   })), [slots, charById, roster, profile]);
 
@@ -2533,6 +2700,13 @@ export default function SongBruhs() {
     return map;
   }, [slots, showtime]);
 
+  /* the blend bridge: adjacent monsters spelling a decodable word */
+  const blend = useMemo(() => {
+    if (showtime) return null;
+    const chars = slots.map((sl) => (sl.soundId && sl.soundId.startsWith('chant_') && !sl.muted ? sl.charId : null));
+    return findBlend(chars);
+  }, [slots, showtime]);
+
   const liveCombos = useMemo(
     () => COMBOS.filter((c) => c.ids.every((id) => desired.get(id) === 1)),
     [desired],
@@ -2548,18 +2722,28 @@ export default function SongBruhs() {
     const parts = [];
     desired.forEach((v, k) => parts.push(`${k}:${v}`));
     liveCombos.forEach((c) => parts.push(`${c.bonus}:1`));
+    if (blend) parts.push(`blend_${blend.word}:1`);
     return parts.sort().join('|');
-  }, [desired, liveCombos]);
+  }, [desired, liveCombos, blend]);
 
   useEffect(() => {
     const eng = engineRef.current;
     if (!eng) return;
     const full = new Map(desired);
     liveCombos.forEach((c) => full.set(c.bonus, 1));
+    if (blend) full.set(`blend_${blend.word}`, 1);
     eng.sync(full);
     // desiredKey is the stable serialisation that drives this effect
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [desiredKey, started]);
+
+  useEffect(() => {
+    if (!blend || !profile) return;
+    if (!(profile.words || []).includes(blend.word)) {
+      updateProfile((pr) => ({ ...pr, words: Array.from(new Set((pr.words || []).concat(blend.word))) }));
+      setToast(`You made the word “${blend.word}”!`);
+    }
+  }, [blend]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (!liveCombos.length) return;
@@ -2620,6 +2804,18 @@ export default function SongBruhs() {
 
   const clearSlot = useCallback((index) => {
     setSlots((prev) => prev.map((s, i) => (i === index ? { ...s, soundId: null, muted: false, solo: false } : s)));
+    setSheet(null);
+  }, []);
+
+  /* Dropping a phoneme monster on a slot gives it its own voice: the chant is
+     the default sound, so arranging the band is arranging phonemes. */
+  const setSlotChar = useCallback((index, charId) => {
+    setSlots((prev) => prev.map((sl, i) => {
+      if (i !== index) return sl;
+      const chant = PHONEME_BY_ID[charId] ? `chant_${charId}` : null;
+      const wasChant = sl.soundId && sl.soundId.startsWith('chant_');
+      return { ...sl, charId, soundId: chant || (wasChant ? null : sl.soundId) };
+    }));
     setSheet(null);
   }, []);
 
@@ -2789,6 +2985,27 @@ export default function SongBruhs() {
         </div>
       </header>
 
+      {/* the blend bridge: the word the band is spelling right now */}
+      {blend && (
+        <div className="relative mt-2 px-3 sm:px-5">
+          <div
+            key={blend.word}
+            data-blend={blend.word}
+            className="sb-drop flex items-center justify-center gap-3 rounded-3xl border-2 border-green-400 bg-neutral-900 px-4 py-3"
+          >
+            <span className="flex items-center gap-1">
+              {blend.parts.map((id, i) => (
+                <span key={i} className="rounded-xl border-2 border-green-400 px-2 py-0.5 text-xl font-black text-green-300">
+                  {PHONEME_BY_ID[id].letter}
+                </span>
+              ))}
+            </span>
+            <span className="text-2xl font-black text-neutral-500">→</span>
+            <span className="text-3xl font-black tracking-wide text-green-300">{blend.word}</span>
+          </div>
+        </div>
+      )}
+
       {/* combo banner */}
       <div className="relative mt-2 min-h-12 px-3 sm:px-5">
         {liveCombos.length > 0 && (
@@ -2906,8 +3123,33 @@ export default function SongBruhs() {
 
         {tab === 'combos' && (
           <div>
+            <p className="mb-2 flex items-center gap-2 text-xs font-black tracking-widest text-green-400">
+              <BookOpen className="h-4 w-4" /> WORDS YOU MADE ({(profile.words || []).length}/{WORDS.length})
+            </p>
             <p className="mb-3 text-sm text-neutral-500">
-              Four secret sets. Land all three sounds at once and a bonus layer fades in on the next bar.
+              Stand your sound monsters next to each other on the Stage and they will blend into a word.
+            </p>
+            <div className="mb-6 grid grid-cols-3 gap-2 sm:grid-cols-6" data-scrapbook={(profile.words || []).length}>
+              {WORDS.map((w) => {
+                const found = (profile.words || []).includes(w.word);
+                return (
+                  <button
+                    key={w.word}
+                    type="button"
+                    disabled={!found}
+                    onClick={() => { if (!playClip(`w:${w.word}`)) speak(w.word, { rate: 0.8 }); }}
+                    className={[
+                      'flex min-h-14 items-center justify-center rounded-2xl border-2 text-xl font-black',
+                      found ? 'border-green-400 bg-neutral-900 text-green-300' : 'border-neutral-800 bg-neutral-950 text-neutral-700',
+                    ].join(' ')}
+                  >
+                    {found ? w.word : '· · ·'}
+                  </button>
+                );
+              })}
+            </div>
+            <p className="mb-3 text-sm text-neutral-500">
+              Four secret sound sets. Land all three at once and a bonus layer fades in on the next bar.
             </p>
             <CombosPanel discovered={discovered} activeIds={activeIds} />
           </div>
@@ -3029,10 +3271,7 @@ export default function SongBruhs() {
                   <button
                     key={c.id}
                     type="button"
-                    onClick={() => {
-                      setSlots((p) => p.map((s, i) => (i === sheet.index ? { ...s, charId: c.id } : s)));
-                      setSheet(null);
-                    }}
+                    onClick={() => setSlotChar(sheet.index, c.id)}
                     className={[
                       'flex flex-col items-center rounded-2xl border-2 bg-neutral-950 p-1',
                       c.id === sheetSlot.charId ? 'border-amber-300' : 'border-neutral-800',
